@@ -212,10 +212,37 @@ async fn readiness_fails_closed_until_the_application_is_ready() {
 
 #[tokio::test]
 async fn api_not_found_uses_the_structured_error_envelope_and_request_id() {
+    for path in [
+        "/api/v1/not-present",
+        "/api/v2/not-present",
+        "/api/not-present",
+    ] {
+        let response = build_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request is valid"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_body(response).await,
+            Bytes::from_static(
+                br#"{"ok":false,"request_id":"req_0198c3b4858070008000000000000001","error":{"code":"NOT_FOUND","message":"The requested resource was not found.","retryable":false,"details":{}}}"#,
+            )
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_api_not_found_retains_the_plain_http_fallback() {
     let response = build_router(test_state())
         .oneshot(
             Request::builder()
-                .uri("/api/v1/not-present")
+                .uri("/not-present")
                 .body(Body::empty())
                 .expect("request is valid"),
         )
@@ -223,12 +250,7 @@ async fn api_not_found_uses_the_structured_error_envelope_and_request_id() {
         .expect("request succeeds");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        response_body(response).await,
-        Bytes::from_static(
-            br#"{"ok":false,"request_id":"req_0198c3b4858070008000000000000001","error":{"code":"NOT_FOUND","message":"The requested resource was not found.","retryable":false,"details":{}}}"#,
-        )
-    );
+    assert!(response_body(response).await.is_empty());
 }
 
 #[tokio::test]

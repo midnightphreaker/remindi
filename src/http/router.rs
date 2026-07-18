@@ -11,11 +11,13 @@ use crate::{
 
 /// Builds the always-on health and API error shell on the single listener.
 pub fn build_router(state: AppState) -> Router {
-    let api = Router::new().fallback(api_not_found);
+    let api = Router::new()
+        .nest("/v1", Router::new())
+        .fallback(api_not_found);
     let router = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        .nest("/api/v1", api)
+        .nest("/api", api)
         .with_state(state.clone());
 
     middleware::apply(router, state)
