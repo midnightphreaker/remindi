@@ -1,10 +1,12 @@
 # Reference Performance Acceptance
 
-Status: **FAIL — Section 7 project-check target not met**
+Status: **PASS — Section 7 project-check target met after scoped query and
+transaction correction**
 
-Measured on 2026-07-19 at source commit `1adceef`. The exact SPEC 23.8
-dataset and all requested dimensions were exercised. The result is not an
-acceptance of the measured deviation.
+Measured on 2026-07-19 on the Task 16 branch based on source commit `1adceef`.
+The exact SPEC 23.8 dataset and all requested dimensions were exercised. The
+original transition-heavy failure is retained below as an operational
+observation.
 
 ## Reproduce
 
@@ -48,11 +50,16 @@ dataset by SQL before measuring:
 | Remindi items | 1,000,000 | 1,000,000 |
 | Active items | 100,000 (10%) | 100,000 (10%) |
 | Projects | 10 | 10 |
-| Ready items | 20,000 | 20,000 |
+| Ready items | 20,000 | 20,000 scheduled time triggers at the fixed clock |
 | Events | 20,000,000 | 20,000,000 |
 | Mean events per item | 20 | 20.0 |
 
-Item generation took 27.900 s and event generation took 180.097 s.
+All 100,000 active items begin in `scheduled`; the first 20,000 have
+`next_fire_at` equal to the fixed check clock and the other 80,000 are in the
+future. This preserves transition work in the measured check rather than
+pre-seeding due state.
+
+Item generation took 25.939 s and event generation took 172.395 s.
 
 ## Results
 
@@ -61,15 +68,32 @@ method: sort all samples and select rank `ceil(0.95 × 40) = 38`.
 
 | Dimension | Median | p95 | Max | Result |
 |---|---:|---:|---:|---|
-| Project list, 100 rows | 361.025 | 454.585 | 5,599.056 | measured |
-| Project/task list, 100 rows | 43.064 | 55.619 | 63.253 | measured |
-| Full indexed project check, 50 results | 248.183 | **728.547** | 751.389 | **FAIL: must be <250 ms p95** |
-| Due-candidate query, 500 rows | 557.096 | 691.212 | 760.768 | measured |
-| History page, 10 events | 0.562 | 0.984 | 6.963 | measured |
-| Write under four concurrent readers | 8.767 | 14.430 | 28.133 | measured |
+| Project list, 100 rows | 418.053 | 496.584 | 7,563.925 | measured |
+| Project/task list, 100 rows | 45.226 | 49.724 | 51.918 | measured |
+| Full indexed project check, 50 results | 69.575 | **101.811** | 123.233 | **PASS: <250 ms p95** |
+| Due-candidate query, 500 rows | 608.603 | 649.104 | 748.688 | measured |
+| History page, 10 events | 0.476 | 1.290 | 3.226 | measured |
+| Write under four concurrent readers | 10.509 | 15.112 | 23.373 | measured |
 
-The four concurrent readers completed 679 indexed count queries during the 40
+The four concurrent readers completed 708 indexed count queries during the 40
 write samples.
+
+### Retained transition-heavy baseline
+
+Before the correction, the same all-scheduled-ready fixture produced a full
+project-check median of 248.183 ms, p95 of **728.547 ms**, and maximum of
+751.389 ms. That result failed the target. Its cause was:
+
+- selection loaded all 10,000 active rows per project, including 8,000 future
+  time triggers, and used a temporary B-tree for a redundant SQL sort; and
+- each 50-item ready page used 50 serial `BEGIN IMMEDIATE` transactions and 50
+  `synchronous=FULL` commits.
+
+The corrected path uses four disjoint `UNION ALL` eligibility branches over
+existing indexes, direct comparisons over canonical UTC timestamps, no
+repository sort, and one transaction for the selected page. It retains
+per-item version checks, CAS updates, immutable events, skip-on-conflict
+behavior, and the later source-defined ready-result ordering.
 
 The actual `Scheduler` processed all 20,000 ready candidates through its
 production candidate parsing, state transition, event, lease, and
@@ -80,8 +104,8 @@ production candidate parsing, state transition, event, lease, and
 | Selected | 20,000 |
 | Applied | 20,000 |
 | Failures/conflicts | 0 / 0 |
-| Elapsed | 190.709 s |
-| Throughput | 104.872 evaluations/s |
+| Elapsed | 190.595 s |
+| Throughput | 104.934 evaluations/s |
 
 ## Database and WAL growth
 
@@ -101,12 +125,13 @@ production candidate parsing, state transition, event, lease, and
   call production Rust services. The due-candidate latency measurement mirrors
   the private production repository SQL exactly; the scheduler measurement
   separately exercises that production repository path end to end.
-- Project checks include normal state-transition writes when a scheduled item
-  first becomes due. Before scheduler measurement, the harness removes those
-  measurement-only events and restores the exact 20,000 ready candidates.
+- Project checks include normal scheduled-to-due transitions. The first sample
+  for each project performs one 50-item transaction and one durable commit.
+  Before scheduler measurement, the harness removes those measurement-only
+  events and restores the exact 20,000 ready candidates.
 - The database is larger than memory cache and the run includes normal warm-up
-  effects. No samples were discarded, including the 5.599 s first project-list
+  effects. No samples were discarded, including the 7.564 s first project-list
   outlier.
-- One exact run was performed on the documented host. The failing target needs
-  query-path investigation and a repeated exact run before version 1
-  performance acceptance can pass.
+- The final acceptance figures come from one exact run on the documented host.
+  The retained baseline and an intermediate steady-state diagnostic run are
+  supporting evidence, not substitutions for the final all-scheduled run.

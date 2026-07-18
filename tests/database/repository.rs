@@ -465,3 +465,64 @@ async fn list_uses_authenticated_keyset_cursor_and_no_offset_query_plan() {
         .join(" ");
     assert!(!detail.to_ascii_uppercase().contains("OFFSET"));
 }
+
+#[tokio::test]
+async fn spec_7_project_check_uses_fire_index_without_redundant_sort() {
+    let directory = std::env::temp_dir().join(format!("remindi-check-plan-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).expect("temp directory");
+    let path = directory.join("remindi.db");
+    let database = DatabaseManager::open(&path).await.expect("database opens");
+    let mut connection = database.connection().await.expect("connection");
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN
+         SELECT r.* FROM remindi r
+         WHERE r.owner_id = ?
+           AND r.project_id = ?
+           AND r.state IN ('due', 'overdue')
+         UNION ALL
+         SELECT r.* FROM remindi r
+         WHERE r.owner_id = ?
+           AND r.project_id = ?
+           AND r.state = 'snoozed'
+           AND r.snooze_until <= ?
+         UNION ALL
+         SELECT r.* FROM remindi r
+         WHERE r.owner_id = ?
+           AND r.project_id = ?
+           AND r.state = 'scheduled'
+           AND r.trigger_type IN ('at_time', 'after_elapsed', 'interval')
+           AND r.next_fire_at <= ?
+         UNION ALL
+         SELECT r.* FROM remindi r
+         WHERE r.owner_id = ?
+           AND r.project_id = ?
+           AND r.state = 'scheduled'
+           AND r.trigger_type IN (
+             'next_session', 'next_continuation', 'goal_active', 'condition'
+           )",
+    )
+    .bind("owner-a")
+    .bind("project-a")
+    .bind("owner-a")
+    .bind("project-a")
+    .bind("2026-07-19T00:00:00.000Z")
+    .bind("owner-a")
+    .bind("project-a")
+    .bind("2026-07-19T00:00:00.000Z")
+    .bind("owner-a")
+    .bind("project-a")
+    .fetch_all(connection.as_mut())
+    .await
+    .expect("query plan");
+    let detail = plan
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    assert!(detail.contains("IDX_REMINDI_PROJECT_STATE_FIRE"));
+    assert!(detail.contains("NEXT_FIRE_AT<?"));
+    assert!(!detail.contains("TEMP B-TREE"));
+    drop(connection);
+    database.close().await.expect("database closes");
+}

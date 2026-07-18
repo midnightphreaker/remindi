@@ -770,17 +770,19 @@ impl RemindiService {
             .as_deref()
             .map(|value| self.decode_cursor::<CheckCursor>(value, "check"))
             .transpose()?;
+        let now = self.clock.now();
         let mut connection = self.database.connection().await.map_err(map_database)?;
         let candidates = RemindiRepository::check_candidates(
             connection.as_mut(),
             &self.owner_id,
             &request.project_id,
             request.task_id.as_deref(),
+            now,
+            request.include_scheduled,
         )
         .await
         .map_err(map_repository)?;
         drop(connection);
-        let now = self.clock.now();
         let context = CheckContext {
             session_id: request.session_id,
             task_lineage_id: request.task_lineage_id,
@@ -804,6 +806,7 @@ impl RemindiService {
                         remindi: preview,
                         readiness,
                     },
+                    result.events,
                 ));
             }
         }
@@ -823,15 +826,42 @@ impl RemindiService {
         } else {
             None
         };
+        if ready.iter().all(|item| item.2.is_empty()) {
+            return Ok(CheckResult {
+                checked_at: now,
+                items: ready
+                    .into_iter()
+                    .map(|(prior, checked, _)| CheckedItem {
+                        remindi: prior,
+                        readiness: checked.readiness,
+                    })
+                    .collect(),
+                next_cursor,
+            });
+        }
         let mut items = Vec::with_capacity(ready.len());
-        for (candidate, _) in ready {
+        let mut transaction = self
+            .database
+            .begin_immediate()
+            .await
+            .map_err(map_database)?;
+        for (prior, checked, events) in ready {
+            if events.is_empty() {
+                items.push(CheckedItem {
+                    remindi: prior,
+                    readiness: checked.readiness,
+                });
+                continue;
+            }
             if let Some(item) = self
-                .evaluate_one(
+                .persist_evaluated(
+                    transaction.as_mut(),
                     actor,
-                    candidate,
-                    now,
+                    prior,
+                    checked.remindi,
+                    Some(checked.readiness),
+                    events,
                     &context,
-                    ConditionEvaluation::NotEvaluated,
                     None,
                 )
                 .await?
@@ -839,6 +869,7 @@ impl RemindiService {
                 items.push(item);
             }
         }
+        transaction.commit().await.map_err(map_database)?;
         Ok(CheckResult {
             checked_at: now,
             items,
@@ -905,24 +936,53 @@ impl RemindiService {
             .begin_immediate()
             .await
             .map_err(map_database)?;
-        let current = RemindiRepository::find(transaction.as_mut(), &self.owner_id, candidate.id)
+        let evaluated = self
+            .persist_evaluated(
+                transaction.as_mut(),
+                actor,
+                prior,
+                candidate,
+                result.readiness,
+                result.events,
+                context,
+                condition_detail,
+            )
+            .await?;
+        transaction.commit().await.map_err(map_database)?;
+        Ok(evaluated)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the helper preserves the complete evaluated transition and audit context"
+    )]
+    async fn persist_evaluated(
+        &self,
+        connection: &mut sqlx::SqliteConnection,
+        actor: &Actor,
+        prior: Remindi,
+        candidate: Remindi,
+        readiness: Option<Readiness>,
+        events: Vec<EventType>,
+        context: &CheckContext,
+        condition_detail: Option<String>,
+    ) -> Result<Option<CheckedItem>, ServiceError> {
+        let current = RemindiRepository::find(connection, &self.owner_id, candidate.id)
             .await
             .map_err(map_repository)?
             .ok_or(ServiceError::NotFound)?;
         if current.version != prior.version {
-            transaction.rollback().await.map_err(map_database)?;
             return Ok(None);
         }
-        if !RemindiRepository::update_cas(transaction.as_mut(), &candidate, prior.version)
+        if !RemindiRepository::update_cas(connection, &candidate, prior.version)
             .await
             .map_err(map_repository)?
         {
-            transaction.rollback().await.map_err(map_database)?;
             return Ok(None);
         }
-        for event_type in result.events {
+        for event_type in events {
             self.append_event(
-                transaction.as_mut(),
+                connection,
                 EventAppend {
                     actor,
                     item: &candidate,
@@ -938,8 +998,7 @@ impl RemindiService {
             )
             .await?;
         }
-        transaction.commit().await.map_err(map_database)?;
-        Ok(result.readiness.map(|readiness| CheckedItem {
+        Ok(readiness.map(|readiness| CheckedItem {
             remindi: candidate,
             readiness,
         }))
