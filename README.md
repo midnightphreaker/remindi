@@ -1050,7 +1050,7 @@ See the [Remindi customization guide](customization/README.md) for:
 
 - the `REMINDI_WEBUI_TITLE` page-title setting;
 - the CSS, logo, and favicon environment variables;
-- Docker Compose bind mounts and native absolute-path examples;
+- the ready-to-edit Docker Compose override and native absolute-path examples;
 - supported formats, size limits, permissions, and startup behavior; and
 - reset and upgrade instructions.
 
@@ -1109,8 +1109,8 @@ Custom asset paths are read once at startup, must be absolute, and must not be
 world-writable. In a container, mount each file and use its absolute container
 path.
 
-Editable copies of the default assets, Docker Compose and native examples, and
-page-title instructions are in the
+Editable copies of the default assets, a ready-to-edit Docker Compose override,
+native examples, and page-title instructions are in the
 [`customization/` guide](customization/README.md).
 
 | Asset | Maximum size | Accepted content |

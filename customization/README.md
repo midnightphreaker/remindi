@@ -14,6 +14,10 @@ The three files in this directory are copies of the embedded defaults in
 otherwise expose the files to the process and set the matching environment
 variables.
 
+The supplied [`compose.override.yaml`](compose.override.yaml) already mounts
+all three files and sets their container paths. Edit that file instead of
+creating a separate override.
+
 Remindi reads the title and asset files once during startup. Restart or recreate
 the service after every change.
 
@@ -43,25 +47,15 @@ The supplied Compose expression treats an unset or blank title as `Remindi`.
 A directly launched native process can receive an explicitly empty title and
 will render it blank.
 
-### 2. Mount the customization files
+### 2. Edit the supplied Compose override
 
-Create `compose.override.yaml` beside the main `compose.yaml`:
+Edit [`customization/compose.override.yaml`](compose.override.yaml) from the
+repository root. It is ready to use with the supplied CSS, logo, and favicon.
+The bind-mount source paths are relative to the root `compose.yaml`.
 
-```yaml
-services:
-  remindi:
-    environment:
-      REMINDI_WEBUI_CUSTOM_CSS_FILE: /customization/app.css
-      REMINDI_WEBUI_LOGO_FILE: /customization/logo.svg
-      REMINDI_WEBUI_FAVICON_FILE: /customization/favicon.svg
-    volumes:
-      - ./customization/app.css:/customization/app.css:ro
-      - ./customization/logo.svg:/customization/logo.svg:ro
-      - ./customization/favicon.svg:/customization/favicon.svg:ro
-```
-
-Omit an environment entry and its mount when you do not want to override that
-asset.
+Remove an environment entry and its matching mount when you do not want to
+override that asset. If you change a filename or format, update both its
+environment value and mount.
 
 Ensure the files are readable by the container and not world-writable:
 
@@ -74,10 +68,25 @@ chmod 0644 customization/app.css \
 ### 3. Validate and recreate Remindi
 
 ```bash
-docker compose config
-docker compose up -d --build --force-recreate remindi
-docker compose ps remindi
+docker compose \
+  -f compose.yaml \
+  -f customization/compose.override.yaml \
+  config
+
+docker compose \
+  -f compose.yaml \
+  -f customization/compose.override.yaml \
+  up -d --build --force-recreate remindi
+
+docker compose \
+  -f compose.yaml \
+  -f customization/compose.override.yaml \
+  ps remindi
 ```
+
+Because the supplied override is inside `customization/`, Compose does not load
+it automatically; include both `-f` arguments whenever you operate this
+deployment.
 
 Using `--force-recreate` applies both changed environment values and changed
 startup-loaded files. A plain container restart does not apply a changed title
@@ -87,7 +96,10 @@ Open the WebUI and perform a hard refresh. If Remindi does not become healthy,
 inspect the startup error:
 
 ```bash
-docker compose logs --tail=100 remindi
+docker compose \
+  -f compose.yaml \
+  -f customization/compose.override.yaml \
+  logs --tail=100 remindi
 ```
 
 ## Native process
@@ -187,13 +199,17 @@ replaced directly through environment variables.
 
 To restore the embedded assets:
 
-1. Remove the three file environment entries from `compose.override.yaml`.
-2. Remove their bind mounts.
+1. Edit `customization/compose.override.yaml`.
+2. Remove each unwanted file environment entry and its matching bind mount. If
+   you remove all overrides, the file can contain only `services: {}`.
 3. Set `REMINDI_WEBUI_TITLE=Remindi` or remove the title from `.env`.
-4. Recreate the service:
+4. Recreate the service with both Compose files:
 
    ```bash
-   docker compose up -d --force-recreate remindi
+   docker compose \
+     -f compose.yaml \
+     -f customization/compose.override.yaml \
+     up -d --force-recreate remindi
    ```
 
 ## Upgrades

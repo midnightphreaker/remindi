@@ -1,0 +1,12 @@
+# Edit this file to enable, disable, or rename Remindi's custom WebUI assets.
+# Run it together with the repository's compose.yaml as documented in README.md.
+services:
+  remindi:
+    environment:
+      REMINDI_WEBUI_CUSTOM_CSS_FILE: /customization/app.css
+      REMINDI_WEBUI_LOGO_FILE: /customization/logo.svg
+      REMINDI_WEBUI_FAVICON_FILE: /customization/favicon.svg
+    volumes:
+      - ./customization/app.css:/customization/app.css:ro
+      - ./customization/logo.svg:/customization/logo.svg:ro
+      - ./customization/favicon.svg:/customization/favicon.svg:ro
