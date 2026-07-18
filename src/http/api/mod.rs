@@ -14,7 +14,11 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::{
-    admin::{AdminService, backup::BackupManager, workloads::WorkloadController},
+    admin::{
+        AdminService,
+        backup::{BackupManager, RestoreManager},
+        workloads::WorkloadController,
+    },
     auth::{
         csrf::{self, CSRF_HEADER},
         web_session::{LoginError, SessionError, WebMode, WebSessionManager},
@@ -34,6 +38,7 @@ pub struct WebApiState {
     administration: Option<Arc<AdminService>>,
     workloads: Option<Arc<WorkloadController>>,
     backups: Option<Arc<BackupManager>>,
+    restore: Option<Arc<RestoreManager>>,
 }
 
 impl WebApiState {
@@ -45,6 +50,7 @@ impl WebApiState {
             administration: None,
             workloads: None,
             backups: None,
+            restore: None,
         }
     }
 
@@ -64,6 +70,13 @@ impl WebApiState {
     #[must_use]
     pub fn with_backups(mut self, backups: Arc<BackupManager>) -> Self {
         self.backups = Some(backups);
+        self
+    }
+
+    /// Attaches guarded restore administration to the authenticated API.
+    #[must_use]
+    pub fn with_restore(mut self, restore: Arc<RestoreManager>) -> Self {
+        self.restore = Some(restore);
         self
     }
 
@@ -88,6 +101,10 @@ impl WebApiState {
     pub(crate) fn backups(&self) -> Option<&BackupManager> {
         self.backups.as_deref()
     }
+
+    pub(crate) fn restore(&self) -> Option<&RestoreManager> {
+        self.restore.as_deref()
+    }
 }
 
 /// Builds the complete Task 9 route subtree, ready to nest at `/api/v1`.
@@ -99,6 +116,7 @@ pub fn router(state: WebApiState) -> Router {
     let mut router = Router::new()
         .route("/session", get(session))
         .route("/auth/login", post(login))
+        .route("/auth/reauthenticate", post(reauthenticate))
         .route("/auth/logout", post(logout));
     if administration {
         router = router.merge(admin::routes());
@@ -114,6 +132,12 @@ pub fn router(state: WebApiState) -> Router {
 #[serde(deny_unknown_fields)]
 struct LoginRequest {
     username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReauthenticateRequest {
     password: String,
 }
 
@@ -257,6 +281,53 @@ async fn logout(State(state): State<WebApiState>, headers: HeaderMap) -> Respons
     response
 }
 
+async fn reauthenticate(
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
+    Json(body): Json<ReauthenticateRequest>,
+) -> Response {
+    if let Err(response) = authorize_mutation(&state, &headers, &http::Method::POST) {
+        return *response;
+    }
+    match state
+        .sessions
+        .reauthenticate(&headers, &body.password, OffsetDateTime::now_utc())
+    {
+        Ok(session) => success(
+            &headers,
+            SessionData {
+                authenticated: true,
+                authentication_required: true,
+                actor_id: Some(session.actor_id),
+                csrf_token: session.csrf_token,
+                expires_at: Some(format_time(session.expires_at)),
+                reauthentication_required: false,
+            },
+        ),
+        Err(LoginError::RateLimited) => api_error(
+            &headers,
+            StatusCode::TOO_MANY_REQUESTS,
+            "LIMIT_EXCEEDED",
+            "Password verification is temporarily unavailable.",
+            false,
+            None,
+        ),
+        Err(
+            LoginError::InvalidCredentials
+            | LoginError::Disabled
+            | LoginError::CsrfRejected
+            | LoginError::Randomness,
+        ) => api_error(
+            &headers,
+            StatusCode::UNAUTHORIZED,
+            "REAUTHENTICATION_REQUIRED",
+            "Recent password verification is required.",
+            false,
+            None,
+        ),
+    }
+}
+
 pub(crate) fn actor(state: &WebApiState, headers: &HeaderMap) -> Result<Actor, Box<Response>> {
     let session = state
         .sessions
@@ -342,6 +413,14 @@ pub(crate) fn service_error(headers: &HeaderMap, error: ServiceError) -> Respons
             StatusCode::SERVICE_UNAVAILABLE,
             "DATABASE_BUSY",
             "The database is busy; retry the request.",
+            true,
+            None,
+        ),
+        ServiceError::MaintenanceActive => api_error(
+            headers,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MAINTENANCE_ACTIVE",
+            "Database maintenance is active; retry the request.",
             true,
             None,
         ),

@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::{
     clock::Clock,
@@ -158,6 +158,12 @@ pub struct WorkloadController {
     state: RwLock<ControllerState>,
 }
 
+/// Holds the lifecycle transition lock while restore owns database maintenance.
+pub struct WorkloadMaintenance<'a> {
+    controller: &'a WorkloadController,
+    _transition: MutexGuard<'a, ()>,
+}
+
 impl WorkloadController {
     /// Builds and reconciles the concrete MCP and scheduler workloads from persisted intent.
     pub async fn new(
@@ -246,6 +252,29 @@ impl WorkloadController {
             }
         }
         Ok(())
+    }
+
+    /// Stops MCP and scheduler without changing persisted desired state.
+    pub async fn quiesce_for_maintenance(&self) -> Result<WorkloadMaintenance<'_>, WorkloadError> {
+        let transition = self.transition.lock().await;
+        let mut stopped = Vec::new();
+        for component in selected_components(WorkloadComponent::All) {
+            if self.runtime(*component).is_running() {
+                if let Err(error) = self.apply_action(*component, WorkloadAction::Stop).await {
+                    for stopped_component in stopped.into_iter().rev() {
+                        let _ = self
+                            .apply_action(stopped_component, WorkloadAction::Start)
+                            .await;
+                    }
+                    return Err(error);
+                }
+                stopped.push(*component);
+            }
+        }
+        Ok(WorkloadMaintenance {
+            controller: self,
+            _transition: transition,
+        })
     }
 
     async fn persist_desired(
@@ -384,6 +413,36 @@ impl WorkloadController {
         let status = status_mut(&mut state, component);
         status.actual = actual;
         status.last_error = last_error;
+        Ok(())
+    }
+}
+
+impl WorkloadMaintenance<'_> {
+    /// Re-reads persisted intent from the active database and reconciles both workloads.
+    pub async fn restart_from_persisted(&self) -> Result<Vec<WorkloadStatus>, WorkloadError> {
+        let (mcp_desired, scheduler_desired) = load_desired(&self.controller.database).await?;
+        self.controller
+            .set_desired(WorkloadComponent::Mcp, mcp_desired)?;
+        self.controller
+            .set_desired(WorkloadComponent::Scheduler, scheduler_desired)?;
+        self.controller
+            .reconcile_component(WorkloadComponent::Mcp, mcp_desired)
+            .await?;
+        self.controller
+            .reconcile_component(WorkloadComponent::Scheduler, scheduler_desired)
+            .await?;
+        Ok(self.controller.status())
+    }
+
+    /// Stops any workload that partially restarted while preserving persisted intent.
+    pub async fn quiesce_again(&self) -> Result<(), WorkloadError> {
+        for component in selected_components(WorkloadComponent::All) {
+            if self.controller.runtime(*component).is_running() {
+                self.controller
+                    .apply_action(*component, WorkloadAction::Stop)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }

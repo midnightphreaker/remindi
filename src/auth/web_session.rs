@@ -209,6 +209,34 @@ impl WebSessionManager {
         }
     }
 
+    /// Re-validates the configured password and refreshes the session's recent-auth time.
+    pub fn reauthenticate(
+        &self,
+        headers: &HeaderMap,
+        password: &str,
+        now: OffsetDateTime,
+    ) -> Result<SessionView, LoginError> {
+        if self.inner.mode != WebMode::Authenticated {
+            return Err(LoginError::Disabled);
+        }
+        self.check_rate_limit(now)?;
+        let password_valid = self
+            .inner
+            .password_digest
+            .is_some_and(|expected| digest(password).ct_eq(&expected).into());
+        let id = cookie_value(headers, SESSION_COOKIE).ok_or(LoginError::InvalidCredentials)?;
+        let mut sessions = lock(&self.inner.sessions);
+        let session = sessions
+            .get_mut(id)
+            .filter(|session| session.expires_at > now)
+            .ok_or(LoginError::InvalidCredentials)?;
+        if !password_valid {
+            return Err(LoginError::InvalidCredentials);
+        }
+        session.reauthenticated_at = now;
+        Ok(view(session.clone()))
+    }
+
     pub fn logout(&self, headers: &HeaderMap) -> HeaderValue {
         if let Some(id) = cookie_value(headers, SESSION_COOKIE) {
             lock(&self.inner.sessions).remove(id);

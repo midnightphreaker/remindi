@@ -266,6 +266,11 @@ fn error_result(request_id: String, error: HandlerError) -> rmcp::model::CallToo
             "The database is busy; retry the request.",
             None,
         ),
+        HandlerError::Service(ServiceError::MaintenanceActive) => (
+            ErrorCode::MaintenanceActive,
+            "Database maintenance is active; retry the request.",
+            None,
+        ),
         HandlerError::Service(ServiceError::Validation | ServiceError::InvalidCursor) => {
             (ErrorCode::ValidationError, "Input failed validation.", None)
         }

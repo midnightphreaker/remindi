@@ -175,6 +175,8 @@ pub enum ServiceError {
     InvalidCursor,
     #[error("database is busy")]
     DatabaseBusy,
+    #[error("database maintenance is active")]
+    MaintenanceActive,
     #[error("internal service error")]
     Internal,
 }
@@ -1483,6 +1485,9 @@ fn map_domain(error: DomainError) -> ServiceError {
 
 fn map_database(error: crate::db::DatabaseError) -> ServiceError {
     match error {
+        crate::db::DatabaseError::MaintenanceActive | crate::db::DatabaseError::Closed => {
+            ServiceError::MaintenanceActive
+        }
         crate::db::DatabaseError::Sql(sqlx::Error::Database(error))
             if sqlite_busy(error.as_ref()) =>
         {

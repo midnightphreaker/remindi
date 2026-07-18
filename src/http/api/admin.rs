@@ -13,12 +13,13 @@ use axum::{
 };
 use futures::StreamExt;
 use serde::Deserialize;
+use time::{Duration, OffsetDateTime};
 use tokio_util::io::ReaderStream;
 
 use crate::admin::{
     AdminActor, AdminError,
     adapters::AdapterConfiguration,
-    backup::{BackupError, BackupRecord, BackupSource},
+    backup::{BackupError, BackupRecord, BackupSource, RestoreFault, RestoreOutcome},
     workloads::{WorkloadAction, WorkloadComponent, WorkloadError},
 };
 
@@ -50,6 +51,12 @@ struct AuditQuery {
 #[serde(deny_unknown_fields)]
 struct WorkloadMutation {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreRequest {
+    confirmation: String,
+}
+
 /// Returns the complete administration route group for a configured WebUI API.
 pub fn routes() -> Router<WebApiState> {
     Router::new()
@@ -68,6 +75,7 @@ pub fn routes() -> Router<WebApiState> {
         )
         .route("/backups/{id}/verify", post(verify_backup))
         .route("/backups/{id}/download", get(download_backup))
+        .route("/backups/{id}/restore", post(restore_backup))
 }
 
 async fn bootstrap(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
@@ -366,6 +374,52 @@ async fn verify_backup(
     }
 }
 
+async fn restore_backup(
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<RestoreRequest>,
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::POST) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let now = OffsetDateTime::now_utc();
+    let session = match state.sessions().authenticate(&headers, now) {
+        Ok(session) => session,
+        Err(_) => {
+            return api_error(
+                &headers,
+                StatusCode::UNAUTHORIZED,
+                "REAUTHENTICATION_REQUIRED",
+                "Recent password verification is required.",
+                false,
+                None,
+            );
+        }
+    };
+    if !recently_reauthenticated(session.reauthenticated_at, now) {
+        return api_error(
+            &headers,
+            StatusCode::UNAUTHORIZED,
+            "REAUTHENTICATION_REQUIRED",
+            "Recent password verification is required.",
+            false,
+            None,
+        );
+    }
+    let Some(restore) = state.restore() else {
+        return unavailable(&headers);
+    };
+    match restore
+        .restore(&id, &request.confirmation, &actor, RestoreFault::None)
+        .await
+    {
+        Ok(data) => success::<RestoreOutcome>(&headers, data),
+        Err(error) => backup_error(&headers, error),
+    }
+}
+
 fn created(headers: &HeaderMap, data: BackupRecord) -> Response {
     let mut response = success(headers, data);
     *response.status_mut() = StatusCode::CREATED;
@@ -437,6 +491,22 @@ fn backup_error(headers: &HeaderMap, error: BackupError) -> Response {
             false,
             None,
         ),
+        BackupError::RestoreConfirmation => api_error(
+            headers,
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "The exact restore confirmation phrase is required.",
+            false,
+            None,
+        ),
+        BackupError::RestoreFailed | BackupError::Workload => api_error(
+            headers,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RESTORE_FAILED",
+            "Restore failed and rollback was attempted.",
+            false,
+            None,
+        ),
         BackupError::Database | BackupError::Io => api_error(
             headers,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -457,4 +527,28 @@ fn unavailable(headers: &HeaderMap) -> Response {
         false,
         None,
     )
+}
+
+fn recently_reauthenticated(reauthenticated_at: OffsetDateTime, now: OffsetDateTime) -> bool {
+    reauthenticated_at <= now && now - reauthenticated_at <= Duration::minutes(5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    #[test]
+    fn restore_reauthentication_window_is_exactly_five_minutes_and_not_future_dated() {
+        let now = datetime!(2026-07-19 03:00 UTC);
+        assert!(recently_reauthenticated(now - Duration::minutes(5), now));
+        assert!(!recently_reauthenticated(
+            now - Duration::minutes(5) - Duration::nanoseconds(1),
+            now
+        ));
+        assert!(!recently_reauthenticated(
+            now + Duration::nanoseconds(1),
+            now
+        ));
+    }
 }

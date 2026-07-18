@@ -30,7 +30,10 @@ use crate::{
     remindi::canonical_timestamp,
 };
 
-use super::{AdminActor, audit};
+use super::{
+    AdminActor, audit,
+    workloads::{WorkloadController, WorkloadError},
+};
 
 const CURRENT_SCHEMA_VERSION: i64 = 2;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -97,6 +100,62 @@ pub enum BackupError {
     Database,
     #[error("backup filesystem operation failed")]
     Io,
+    #[error("restore confirmation was invalid")]
+    RestoreConfirmation,
+    #[error("restore failed and rollback was attempted")]
+    RestoreFailed,
+    #[error("restore workload transition failed")]
+    Workload,
+}
+
+/// Exact typed phrase required by the guarded restore contract.
+pub const RESTORE_CONFIRMATION: &str = "RESTORE REMINDI";
+
+/// Durable restore journal phases from DESIGN 18.4.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestorePhase {
+    Requested,
+    CandidateVerified,
+    PreRestoreBackupVerified,
+    WorkloadsQuiesced,
+    LiveReplaced,
+    ReplacementVerified,
+    WorkloadsRestarted,
+    Succeeded,
+    RollbackStarted,
+    PreRestoreReinstalled,
+    RollbackVerified,
+    WorkloadsRestartedOrHeld,
+    Failed,
+}
+
+/// Deterministic failure seam used by restore integration tests.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RestoreFault {
+    #[default]
+    None,
+    BeforeSwap,
+    DuringReopen,
+    AfterSwap,
+}
+
+/// Redacted result of a guarded restore.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RestoreOutcome {
+    pub operation_id: String,
+    pub backup_id: String,
+    pub restored: bool,
+    pub rolled_back: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreJournal {
+    operation_id: String,
+    phase: RestorePhase,
+    candidate_file: String,
+    pre_restore_file: String,
 }
 
 pub struct BackupManager {
@@ -106,6 +165,14 @@ pub struct BackupManager {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     mutation: Mutex<()>,
+}
+
+/// Coordinates one guarded restore at a time without stopping the control plane.
+pub struct RestoreManager {
+    database: Arc<DatabaseManager>,
+    backups: Arc<BackupManager>,
+    workloads: Arc<WorkloadController>,
+    operation: Mutex<()>,
 }
 
 impl BackupManager {
@@ -401,55 +468,13 @@ impl BackupManager {
         fs::create_dir_all(&self.directory)
             .await
             .map_err(|_| BackupError::Io)?;
-        protect_directory(&self.directory).await
+        protect_directory(&self.directory).await?;
+        remove_if_exists(&self.directory.join(".restore-journal.tmp")).await;
+        Ok(())
     }
 
     async fn verify_database(&self, path: &Path) -> Result<VerifiedFile, BackupError> {
-        verify_header(path).await?;
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
-            .map_err(|_| BackupError::Invalid)?
-            .read_only(true)
-            .create_if_missing(false);
-        let mut connection = SqliteConnection::connect_with(&options)
-            .await
-            .map_err(|_| BackupError::Invalid)?;
-        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_one(&mut connection)
-            .await
-            .map_err(|_| BackupError::Invalid)?;
-        if integrity != "ok" {
-            return Err(BackupError::Invalid);
-        }
-        let schema_version: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-                .fetch_one(&mut connection)
-                .await
-                .map_err(|_| BackupError::Invalid)?;
-        if !(1..=CURRENT_SCHEMA_VERSION).contains(&schema_version) {
-            return Err(BackupError::Invalid);
-        }
-        let wrong_owner: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM remindi WHERE owner_id <> ?")
-                .bind(&self.owner_id)
-                .fetch_one(&mut connection)
-                .await
-                .map_err(|_| BackupError::Invalid)?;
-        let invariant_violations: i64 = sqlx::query_scalar(
-            "SELECT \
-               (SELECT COUNT(*) FROM remindi r WHERE \
-                  (r.state = 'completed') <> \
-                  (SELECT COUNT(*) = 1 FROM completion_evidence e WHERE e.remindi_id = r.id)) + \
-               (SELECT COUNT(*) FROM remindi WHERE \
-                  (snooze_until IS NULL) <> (snoozed_from_state IS NULL))",
-        )
-        .fetch_one(&mut connection)
-        .await
-        .map_err(|_| BackupError::Invalid)?;
-        connection.close().await.map_err(|_| BackupError::Invalid)?;
-        if wrong_owner != 0 || invariant_violations != 0 {
-            return Err(BackupError::Invalid);
-        }
-        hash_file(path, schema_version, self.clock.now()).await
+        verify_database_at(path, &self.owner_id, self.clock.now()).await
     }
 
     async fn publish(
@@ -531,6 +556,369 @@ impl BackupManager {
             .map_err(|_| BackupError::Database)?;
         Ok(result.rows_affected() == 1)
     }
+}
+
+async fn verify_database_at(
+    path: &Path,
+    owner_id: &str,
+    now: time::OffsetDateTime,
+) -> Result<VerifiedFile, BackupError> {
+    verify_header(path).await?;
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
+        .map_err(|_| BackupError::Invalid)?
+        .read_only(true)
+        .create_if_missing(false);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|_| BackupError::Invalid)?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| BackupError::Invalid)?;
+    if integrity != "ok" {
+        return Err(BackupError::Invalid);
+    }
+    let schema_version: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .map_err(|_| BackupError::Invalid)?;
+    if !(1..=CURRENT_SCHEMA_VERSION).contains(&schema_version) {
+        return Err(BackupError::Invalid);
+    }
+    let wrong_owner: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remindi WHERE owner_id <> ?")
+        .bind(owner_id)
+        .fetch_one(&mut connection)
+        .await
+        .map_err(|_| BackupError::Invalid)?;
+    let invariant_violations: i64 = sqlx::query_scalar(
+        "SELECT \
+               (SELECT COUNT(*) FROM remindi r WHERE \
+                  (r.state = 'completed') <> \
+                  (SELECT COUNT(*) = 1 FROM completion_evidence e WHERE e.remindi_id = r.id)) + \
+               (SELECT COUNT(*) FROM remindi WHERE \
+                  (snooze_until IS NULL) <> (snoozed_from_state IS NULL))",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .map_err(|_| BackupError::Invalid)?;
+    connection.close().await.map_err(|_| BackupError::Invalid)?;
+    if wrong_owner != 0 || invariant_violations != 0 {
+        return Err(BackupError::Invalid);
+    }
+    hash_file(path, schema_version, now).await
+}
+
+impl RestoreManager {
+    #[must_use]
+    pub fn new(
+        database: Arc<DatabaseManager>,
+        backups: Arc<BackupManager>,
+        workloads: Arc<WorkloadController>,
+    ) -> Self {
+        Self {
+            database,
+            backups,
+            workloads,
+            operation: Mutex::new(()),
+        }
+    }
+
+    /// Restores one previously verified backup under exclusive maintenance.
+    pub async fn restore(
+        &self,
+        backup_id: &str,
+        confirmation: &str,
+        actor: &AdminActor,
+        fault: RestoreFault,
+    ) -> Result<RestoreOutcome, BackupError> {
+        if confirmation != RESTORE_CONFIRMATION {
+            return Err(BackupError::RestoreConfirmation);
+        }
+        let _operation = self.operation.lock().await;
+        let requested = self
+            .backups
+            .list()
+            .await?
+            .into_iter()
+            .find(|record| record.id == backup_id && record.status != "expired")
+            .ok_or(BackupError::NotFound)?;
+        if !safe_file_name(&requested.file_name) {
+            return Err(BackupError::Invalid);
+        }
+        let mut journal = RestoreJournal {
+            operation_id: self.backups.ids.next_id().to_string(),
+            phase: RestorePhase::Requested,
+            candidate_file: requested.file_name,
+            pre_restore_file: String::new(),
+        };
+        self.write_journal(&journal).await?;
+        let (candidate, candidate_path) = match self.backups.download(backup_id).await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.remove_journal().await?;
+                return Err(error);
+            }
+        };
+        journal.phase = RestorePhase::CandidateVerified;
+        self.write_journal(&journal).await?;
+        let pre_restore = match self.backups.create(BackupSource::PreRestore, actor).await {
+            Ok(pre_restore) => pre_restore,
+            Err(error) => {
+                self.remove_journal().await?;
+                return Err(error);
+            }
+        };
+        let (_, pre_restore_path) = match self.backups.download(&pre_restore.id).await {
+            Ok(pre_restore) => pre_restore,
+            Err(error) => {
+                self.remove_journal().await?;
+                return Err(error);
+            }
+        };
+        journal.pre_restore_file = pre_restore.file_name.clone();
+        journal.phase = RestorePhase::PreRestoreBackupVerified;
+        self.write_journal(&journal).await?;
+
+        let workloads = match self.workloads.quiesce_for_maintenance().await {
+            Ok(workloads) => workloads,
+            Err(error) => {
+                self.remove_journal().await?;
+                return Err(map_workload_error(error));
+            }
+        };
+
+        let mut database = self.database.begin_maintenance().await;
+        let operation = async {
+            journal.phase = RestorePhase::WorkloadsQuiesced;
+            self.write_journal(&journal).await?;
+            database
+                .checkpoint_and_close()
+                .await
+                .map_err(|_| BackupError::RestoreFailed)?;
+            if fault == RestoreFault::BeforeSwap {
+                return Err(BackupError::RestoreFailed);
+            }
+            install_database(&candidate_path, self.database.path(), &journal.operation_id).await?;
+            journal.phase = RestorePhase::LiveReplaced;
+            self.write_journal(&journal).await?;
+            if fault == RestoreFault::DuringReopen {
+                return Err(BackupError::RestoreFailed);
+            }
+            database
+                .reopen()
+                .await
+                .map_err(|_| BackupError::RestoreFailed)?;
+            journal.phase = RestorePhase::ReplacementVerified;
+            self.write_journal(&journal).await?;
+            if fault == RestoreFault::AfterSwap {
+                return Err(BackupError::RestoreFailed);
+            }
+            database
+                .clear_scheduler_leases()
+                .await
+                .map_err(|_| BackupError::RestoreFailed)?;
+            Ok::<(), BackupError>(())
+        }
+        .await;
+
+        if operation.is_ok() {
+            drop(database);
+            let completion = async {
+                self.backups.reconcile().await?;
+                workloads
+                    .restart_from_persisted()
+                    .await
+                    .map_err(map_workload_error)?;
+                Ok::<(), BackupError>(())
+            }
+            .await;
+            if completion.is_err() {
+                let _ = workloads.quiesce_again().await;
+                journal.phase = RestorePhase::RollbackStarted;
+                let _ = self.write_journal(&journal).await;
+                let mut rollback_database = self.database.begin_maintenance().await;
+                let _ = rollback_database.checkpoint_and_close().await;
+                install_database(
+                    &pre_restore_path,
+                    self.database.path(),
+                    &journal.operation_id,
+                )
+                .await?;
+                journal.phase = RestorePhase::PreRestoreReinstalled;
+                let _ = self.write_journal(&journal).await;
+                rollback_database
+                    .reopen()
+                    .await
+                    .map_err(|_| BackupError::RestoreFailed)?;
+                journal.phase = RestorePhase::RollbackVerified;
+                let _ = self.write_journal(&journal).await;
+                rollback_database
+                    .clear_scheduler_leases()
+                    .await
+                    .map_err(|_| BackupError::RestoreFailed)?;
+                drop(rollback_database);
+                let restart = workloads.restart_from_persisted().await;
+                journal.phase = RestorePhase::WorkloadsRestartedOrHeld;
+                let _ = self.write_journal(&journal).await;
+                audit::append(
+                    &self.database,
+                    self.backups.clock.as_ref(),
+                    self.backups.ids.as_ref(),
+                    "restore_failed",
+                    actor,
+                    "failed",
+                    &json!({"backup_id": candidate.id, "operation_id": journal.operation_id}),
+                )
+                .await
+                .map_err(|_| BackupError::Database)?;
+                journal.phase = RestorePhase::Failed;
+                let _ = self.write_journal(&journal).await;
+                self.remove_journal().await?;
+                restart.map_err(map_workload_error)?;
+                return Err(BackupError::RestoreFailed);
+            }
+            journal.phase = RestorePhase::WorkloadsRestarted;
+            self.write_journal(&journal).await?;
+            audit::append(
+                &self.database,
+                self.backups.clock.as_ref(),
+                self.backups.ids.as_ref(),
+                "restore_succeeded",
+                actor,
+                "succeeded",
+                &json!({"backup_id": candidate.id, "operation_id": journal.operation_id}),
+            )
+            .await
+            .map_err(|_| BackupError::Database)?;
+            journal.phase = RestorePhase::Succeeded;
+            self.write_journal(&journal).await?;
+            self.remove_journal().await?;
+            return Ok(RestoreOutcome {
+                operation_id: journal.operation_id,
+                backup_id: candidate.id,
+                restored: true,
+                rolled_back: false,
+            });
+        }
+
+        journal.phase = RestorePhase::RollbackStarted;
+        let _ = self.write_journal(&journal).await;
+        let _ = database.checkpoint_and_close().await;
+        install_database(
+            &pre_restore_path,
+            self.database.path(),
+            &journal.operation_id,
+        )
+        .await?;
+        journal.phase = RestorePhase::PreRestoreReinstalled;
+        let _ = self.write_journal(&journal).await;
+        database
+            .reopen()
+            .await
+            .map_err(|_| BackupError::RestoreFailed)?;
+        journal.phase = RestorePhase::RollbackVerified;
+        let _ = self.write_journal(&journal).await;
+        database
+            .clear_scheduler_leases()
+            .await
+            .map_err(|_| BackupError::RestoreFailed)?;
+        drop(database);
+        let restart = workloads.restart_from_persisted().await;
+        journal.phase = RestorePhase::WorkloadsRestartedOrHeld;
+        let _ = self.write_journal(&journal).await;
+        audit::append(
+            &self.database,
+            self.backups.clock.as_ref(),
+            self.backups.ids.as_ref(),
+            "restore_failed",
+            actor,
+            "failed",
+            &json!({"backup_id": candidate.id, "operation_id": journal.operation_id}),
+        )
+        .await
+        .map_err(|_| BackupError::Database)?;
+        journal.phase = RestorePhase::Failed;
+        let _ = self.write_journal(&journal).await;
+        self.remove_journal().await?;
+        restart.map_err(map_workload_error)?;
+        Err(BackupError::RestoreFailed)
+    }
+
+    /// Repairs an interrupted restore before the live SQLx pool is opened.
+    pub async fn recover_interrupted(
+        live_path: &Path,
+        backup_directory: &Path,
+        owner_id: &str,
+        now: time::OffsetDateTime,
+    ) -> Result<bool, BackupError> {
+        let journal_path = backup_directory.join("restore-journal.json");
+        let bytes = match fs::read(&journal_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(BackupError::Io),
+        };
+        if bytes.len() > 16 * 1024 {
+            return Err(BackupError::Invalid);
+        }
+        let journal: RestoreJournal =
+            serde_json::from_slice(&bytes).map_err(|_| BackupError::Invalid)?;
+        if Uuid::parse_str(&journal.operation_id).is_err()
+            || !safe_file_name(&journal.candidate_file)
+            || (!matches!(
+                journal.phase,
+                RestorePhase::Requested | RestorePhase::CandidateVerified
+            ) && !safe_file_name(&journal.pre_restore_file))
+        {
+            return Err(BackupError::Invalid);
+        }
+        if matches!(
+            journal.phase,
+            RestorePhase::Requested | RestorePhase::CandidateVerified
+        ) {
+            verify_database_at(live_path, owner_id, now).await?;
+        } else if journal.phase != RestorePhase::Succeeded {
+            let pre_restore = backup_directory.join(&journal.pre_restore_file);
+            verify_database_at(&pre_restore, owner_id, now).await?;
+            install_database(&pre_restore, live_path, &journal.operation_id).await?;
+            verify_database_at(live_path, owner_id, now).await?;
+        }
+        fs::remove_file(&journal_path)
+            .await
+            .map_err(|_| BackupError::Io)?;
+        sync_directory(backup_directory).await?;
+        Ok(true)
+    }
+
+    fn journal_path(&self) -> PathBuf {
+        self.backups.directory.join("restore-journal.json")
+    }
+
+    async fn write_journal(&self, journal: &RestoreJournal) -> Result<(), BackupError> {
+        let path = self.journal_path();
+        let temporary = self.backups.directory.join(".restore-journal.tmp");
+        let bytes = serde_json::to_vec(journal).map_err(|_| BackupError::Database)?;
+        let mut file = fs::File::create(&temporary)
+            .await
+            .map_err(|_| BackupError::Io)?;
+        file.write_all(&bytes).await.map_err(|_| BackupError::Io)?;
+        file.sync_all().await.map_err(|_| BackupError::Io)?;
+        drop(file);
+        protect_file(&temporary).await?;
+        fs::rename(&temporary, &path)
+            .await
+            .map_err(|_| BackupError::Io)?;
+        sync_directory(&self.backups.directory).await
+    }
+
+    async fn remove_journal(&self) -> Result<(), BackupError> {
+        remove_if_exists(&self.journal_path()).await;
+        sync_directory(&self.backups.directory).await
+    }
+}
+
+fn map_workload_error(_error: WorkloadError) -> BackupError {
+    BackupError::Workload
 }
 
 struct PendingBackup {
@@ -682,6 +1070,25 @@ async fn hash_file(
         schema_version,
         verified_at: canonical_timestamp(verified_at).map_err(|_| BackupError::Database)?,
     })
+}
+
+async fn install_database(
+    source: &Path,
+    live_path: &Path,
+    operation_id: &str,
+) -> Result<(), BackupError> {
+    let parent = live_path.parent().ok_or(BackupError::Io)?;
+    let staged = parent.join(format!(".restore-{operation_id}.sqlite3"));
+    remove_if_exists(&staged).await;
+    fs::copy(source, &staged)
+        .await
+        .map_err(|_| BackupError::Io)?;
+    protect_file(&staged).await?;
+    sync_file(&staged).await?;
+    fs::rename(&staged, live_path)
+        .await
+        .map_err(|_| BackupError::Io)?;
+    sync_directory(parent).await
 }
 
 fn manifest_path(database_path: &Path) -> PathBuf {

@@ -31,6 +31,10 @@ impl IdGenerator for SequenceIds {
 }
 
 async fn app() -> axum::Router {
+    app_with_database().await.0
+}
+
+async fn app_with_database() -> (axum::Router, Arc<DatabaseManager>) {
     let config = Arc::new(
         BootstrapConfig::from_pairs([
             ("REMINDI_OWNER_ID", "owner-a"),
@@ -47,16 +51,32 @@ async fn app() -> axum::Router {
             .expect("database"),
     );
     let service = Arc::new(RemindiService::new(
-        database,
+        Arc::clone(&database),
         config.owner_id(),
         b"cursor-key",
         Arc::new(FixedClock::new(datetime!(2026-07-19 06:00 UTC))),
         Arc::new(SequenceIds::default()),
     ));
-    router(WebApiState::new(
-        WebSessionManager::from_config(&config).expect("sessions"),
-        service,
-    ))
+    (
+        router(WebApiState::new(
+            WebSessionManager::from_config(&config).expect("sessions"),
+            service,
+        )),
+        database,
+    )
+}
+
+#[tokio::test]
+async fn database_api_returns_maintenance_active_during_guarded_restore() {
+    let (app, database) = app_with_database().await;
+    let maintenance = database.begin_maintenance().await;
+
+    let (response, body) = call(&app, "GET", "/remindi?project_id=project-a", None, None).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "MAINTENANCE_ACTIVE");
+    assert_eq!(body["error"]["retryable"], true);
+    drop(maintenance);
 }
 
 async fn call(

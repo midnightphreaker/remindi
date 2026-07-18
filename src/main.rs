@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use remindi::{
     admin::{
-        AdminService, backup::BackupManager, settings::RuntimeSetting,
+        AdminService,
+        backup::{BackupManager, RestoreManager},
+        settings::RuntimeSetting,
         workloads::WorkloadController,
     },
     app::{AppState, run, shutdown_signal},
@@ -25,6 +27,14 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap = BootstrapConfig::from_env().context("bootstrap configuration is invalid")?;
     init_json_tracing(&bootstrap).context("structured logging initialization failed")?;
     let address = bootstrap.listener_address();
+    RestoreManager::recover_interrupted(
+        bootstrap.database_path(),
+        bootstrap.backup_directory(),
+        bootstrap.owner_id(),
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .context("interrupted restore recovery failed")?;
     let database = Arc::new(
         DatabaseManager::open(bootstrap.database_path())
             .await
@@ -144,9 +154,15 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("backup administration startup failed")?,
     );
+    let restore = Arc::new(RestoreManager::new(
+        Arc::clone(&database),
+        Arc::clone(&backups),
+        Arc::clone(&workloads),
+    ));
     let web_api = WebApiState::new(web_sessions, web_service)
         .with_administration(Arc::clone(&administration), Arc::clone(&workloads))
-        .with_backups(Arc::clone(&backups));
+        .with_backups(Arc::clone(&backups))
+        .with_restore(restore);
     let mut state = state
         .with_mcp(Arc::clone(&mcp))
         .with_web_api(web_api)

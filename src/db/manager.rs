@@ -1,4 +1,9 @@
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use sqlx::{
     Sqlite, SqlitePool,
@@ -6,7 +11,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use thiserror::Error;
-use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use super::{migrations, transactions::ImmediateTransaction};
 
@@ -26,6 +31,10 @@ pub enum DatabaseError {
     InvalidBootstrapRows,
     #[error("database integrity check failed")]
     Integrity,
+    #[error("database maintenance is active")]
+    MaintenanceActive,
+    #[error("database pool is closed for maintenance")]
+    Closed,
     #[error("database operation failed")]
     Sql(#[source] sqlx::Error),
     #[error("database filesystem operation failed")]
@@ -46,13 +55,20 @@ impl From<std::io::Error> for DatabaseError {
 
 #[derive(Debug)]
 pub struct DatabaseManager {
-    pool: SqlitePool,
+    path: PathBuf,
+    pool: RwLock<Option<SqlitePool>>,
     maintenance: Arc<RwLock<()>>,
 }
 
 pub struct DatabaseConnection {
     connection: PoolConnection<Sqlite>,
     _maintenance: OwnedRwLockReadGuard<()>,
+}
+
+/// Exclusive database boundary used only by guarded restore and shutdown.
+pub struct DatabaseMaintenance<'a> {
+    manager: &'a DatabaseManager,
+    _maintenance: OwnedRwLockWriteGuard<()>,
 }
 
 impl AsMut<sqlx::SqliteConnection> for DatabaseConnection {
@@ -63,46 +79,24 @@ impl AsMut<sqlx::SqliteConnection> for DatabaseConnection {
 
 impl DatabaseManager {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
-        let path = path.as_ref();
-        validate_data_path(path)?;
-
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Full)
-            .foreign_keys(true)
-            .busy_timeout(Duration::from_millis(5_000));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::raw_sql(
-                        "PRAGMA foreign_keys = ON;
-                         PRAGMA synchronous = FULL;
-                         PRAGMA busy_timeout = 5000;",
-                    )
-                    .execute(connection)
-                    .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await?;
-
+        let path = path.as_ref().to_path_buf();
+        validate_data_path(&path)?;
+        let pool = open_pool(&path).await?;
         let manager = Self {
-            pool,
+            path: path.clone(),
+            pool: RwLock::new(Some(pool)),
             maintenance: Arc::new(RwLock::new(())),
         };
-        manager.quick_check().await?;
-        migrations::apply(&manager.pool).await?;
-        manager.quick_check().await?;
-        protect_database_file(path)?;
+        protect_database_file(&path)?;
         Ok(manager)
     }
 
     pub async fn connection(&self) -> Result<DatabaseConnection, DatabaseError> {
-        let maintenance = Arc::clone(&self.maintenance).read_owned().await;
-        let connection = self.pool.acquire().await?;
+        let maintenance = Arc::clone(&self.maintenance)
+            .try_read_owned()
+            .map_err(|_| DatabaseError::MaintenanceActive)?;
+        let pool = self.active_pool().await?;
+        let connection = pool.acquire().await?;
         Ok(DatabaseConnection {
             connection,
             _maintenance: maintenance,
@@ -114,31 +108,119 @@ impl DatabaseManager {
     }
 
     pub async fn close(self) -> Result<(), DatabaseError> {
-        let _maintenance = self.maintenance.write().await;
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&self.pool)
-            .await?;
-        self.pool.close().await;
+        let mut maintenance = self.begin_maintenance().await;
+        maintenance.checkpoint_and_close().await?;
         Ok(())
     }
 
-    async fn quick_check(&self) -> Result<(), DatabaseError> {
-        let result: String = sqlx::query_scalar("PRAGMA quick_check")
-            .fetch_one(&self.pool)
-            .await?;
-        if result == "ok" {
-            Ok(())
-        } else {
-            Err(DatabaseError::Integrity)
+    /// Acquires the exclusive maintenance boundary after in-flight requests drain.
+    pub async fn begin_maintenance(&self) -> DatabaseMaintenance<'_> {
+        let maintenance = Arc::clone(&self.maintenance).write_owned().await;
+        DatabaseMaintenance {
+            manager: self,
+            _maintenance: maintenance,
         }
     }
 
-    pub(super) fn pool(&self) -> &SqlitePool {
-        &self.pool
+    /// Reports whether maintenance is active or queued.
+    #[must_use]
+    pub fn maintenance_active(&self) -> bool {
+        self.maintenance.try_read().is_err()
+    }
+
+    /// Returns the configured live database path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) async fn active_pool(&self) -> Result<SqlitePool, DatabaseError> {
+        self.pool
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or(DatabaseError::Closed)
     }
 
     pub(super) fn maintenance(&self) -> &Arc<RwLock<()>> {
         &self.maintenance
+    }
+}
+
+impl DatabaseMaintenance<'_> {
+    /// Checkpoints WAL, closes every SQLx connection, and leaves the pool absent.
+    pub async fn checkpoint_and_close(&mut self) -> Result<(), DatabaseError> {
+        let pool = self
+            .manager
+            .pool
+            .write()
+            .await
+            .take()
+            .ok_or(DatabaseError::Closed)?;
+        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await;
+        pool.close().await;
+        checkpoint?;
+        Ok(())
+    }
+
+    /// Reopens the configured path, applies supported migrations, and validates it.
+    pub async fn reopen(&mut self) -> Result<(), DatabaseError> {
+        let pool = open_pool(&self.manager.path).await?;
+        *self.manager.pool.write().await = Some(pool);
+        Ok(())
+    }
+
+    /// Clears process-local scheduler leases in the active replacement database.
+    pub async fn clear_scheduler_leases(&self) -> Result<(), DatabaseError> {
+        let pool = self.manager.active_pool().await?;
+        sqlx::query("DELETE FROM scheduler_leases")
+            .execute(&pool)
+            .await?;
+        Ok(())
+    }
+}
+
+async fn open_pool(path: &Path) -> Result<SqlitePool, DatabaseError> {
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_millis(5_000));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::raw_sql(
+                    "PRAGMA foreign_keys = ON;
+                     PRAGMA synchronous = FULL;
+                     PRAGMA busy_timeout = 5000;",
+                )
+                .execute(connection)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await?;
+    quick_check(&pool).await?;
+    migrations::apply(&pool).await?;
+    quick_check(&pool).await?;
+    protect_database_file(path)?;
+    Ok(pool)
+}
+
+async fn quick_check(pool: &SqlitePool) -> Result<(), DatabaseError> {
+    let result: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(pool)
+        .await?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(DatabaseError::Integrity)
     }
 }
 

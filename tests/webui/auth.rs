@@ -135,6 +135,42 @@ fn login_cookie_expiry_logout_restart_and_rate_limit_are_enforced() {
     ));
 }
 
+#[test]
+fn password_reauthentication_updates_only_a_live_authenticated_session() {
+    let sessions = WebSessionManager::from_config(&config(&[])).expect("sessions");
+    let now = OffsetDateTime::now_utc();
+    let nonce = sessions.issue_pre_session_token(now).expect("nonce");
+    let login = sessions
+        .login("owner", "correct horse battery staple", &nonce, now)
+        .expect("login");
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        login
+            .set_cookie
+            .to_str()
+            .expect("cookie")
+            .split(';')
+            .next()
+            .expect("cookie pair")
+            .parse()
+            .expect("header"),
+    );
+
+    assert!(matches!(
+        sessions.reauthenticate(&headers, "wrong", now + Duration::minutes(1)),
+        Err(LoginError::InvalidCredentials)
+    ));
+    let refreshed = sessions
+        .reauthenticate(
+            &headers,
+            "correct horse battery staple",
+            now + Duration::minutes(2),
+        )
+        .expect("reauthenticated");
+    assert_eq!(refreshed.reauthenticated_at, now + Duration::minutes(2));
+}
+
 #[tokio::test]
 async fn login_is_application_json_without_basic_challenge_and_security_headers_are_set() {
     let state = state(config(&[])).await;
