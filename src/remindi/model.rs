@@ -65,6 +65,8 @@ pub enum DomainError {
     RecurrenceRequiresIntervalTrigger,
     #[error("recurrence interval must match the interval trigger")]
     RecurrenceIntervalMismatch,
+    #[error("stored Remindi value is invalid")]
+    InvalidPersistedValue,
 }
 
 /// Parses offset-bearing RFC 3339 input and normalizes it to UTC.
@@ -105,6 +107,22 @@ macro_rules! string_enum {
         #[serde(rename_all = "snake_case")]
         $visibility enum $name {
             $($variant),+
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+                formatter.write_str(value.as_str().ok_or(std::fmt::Error)?)
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = DomainError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                serde_json::from_value(serde_json::Value::String(value.to_owned()))
+                    .map_err(|_| DomainError::InvalidPersistedValue)
+            }
         }
     };
 }
@@ -249,15 +267,18 @@ string_enum!(
 );
 
 /// One of the seven version-1 trigger classes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Trigger {
     AtTime {
+        #[serde(with = "time::serde::rfc3339")]
         at: OffsetDateTime,
     },
     AfterElapsed {
         after_seconds: u64,
     },
     Interval {
+        #[serde(with = "time::serde::rfc3339")]
         first_at: OffsetDateTime,
         every_seconds: u64,
     },
@@ -270,6 +291,7 @@ pub enum Trigger {
         adapter: String,
         parameters: Value,
         poll_interval_seconds: Option<u64>,
+        #[serde(with = "time::serde::rfc3339::option")]
         manual_check_at: Option<OffsetDateTime>,
     },
 }
@@ -329,11 +351,12 @@ fn valid_adapter_name(name: &str) -> bool {
 }
 
 /// Fixed-interval recurrence constraints.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecurrenceSpec {
     pub every_seconds: u64,
     pub missed_policy: MissedPolicy,
     pub max_occurrences: Option<u64>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub end_at: Option<OffsetDateTime>,
 }
 
@@ -351,7 +374,7 @@ impl RecurrenceSpec {
 }
 
 /// The domain representation of one persisted Remindi item.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Remindi {
     pub id: Uuid,
     pub owner_id: String,
@@ -385,7 +408,7 @@ pub struct Remindi {
 }
 
 /// One association attached to a Remindi item.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RemindiLink {
     pub link_type: LinkType,
     pub value: String,
@@ -393,7 +416,7 @@ pub struct RemindiLink {
 }
 
 /// One append-only lifecycle event.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RemindiEvent {
     pub sequence: Option<i64>,
     pub event_id: Uuid,

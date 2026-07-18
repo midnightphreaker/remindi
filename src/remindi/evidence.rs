@@ -1,24 +1,26 @@
 use std::time::Duration as StdDuration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
 use super::{DomainError, EvidenceType};
 
 /// Where a proposed evidence record originated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum EvidenceSource {
     AuthenticatedActor,
     AdapterTrigger,
 }
 
 /// Completion evidence before application-boundary validation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EvidenceInput {
     pub evidence_type: EvidenceType,
     pub summary: String,
     pub reference_uri: Option<String>,
     pub content_hash: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
     pub metadata: Option<Value>,
     pub source: EvidenceSource,
@@ -39,6 +41,26 @@ impl ValidatedEvidence {
     #[must_use]
     pub fn content_hash(&self) -> Option<&str> {
         self.0.content_hash.as_deref()
+    }
+
+    #[must_use]
+    pub const fn evidence_type(&self) -> EvidenceType {
+        self.0.evidence_type
+    }
+
+    #[must_use]
+    pub fn reference_uri(&self) -> Option<&str> {
+        self.0.reference_uri.as_deref()
+    }
+
+    #[must_use]
+    pub const fn observed_at(&self) -> OffsetDateTime {
+        self.0.observed_at
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> Option<&Value> {
+        self.0.metadata.as_ref()
     }
 }
 
