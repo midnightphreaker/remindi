@@ -20,6 +20,10 @@
     <nav aria-label="Primary">
       <a href="?view=dashboard" data-nav="dashboard" aria-current="page">Dashboard</a>
       <a href="?view=items" data-nav="items">Remindi items</a>
+      <a href="?view=adapters" data-nav="adapters">Adapters</a>
+      <a href="?view=settings" data-nav="settings">Settings</a>
+      <a href="?view=workloads" data-nav="workloads">Workloads</a>
+      <a href="?view=audit" data-nav="audit">Audit</a>
     </nav>
     <button id="logout-button" class="button quiet" type="button">Sign out</button>
   </header>
@@ -89,6 +93,43 @@
     <section id="detail-view" aria-labelledby="detail-title" hidden>
       <button id="detail-back" class="back-link" type="button">← Back to items</button>
       <div id="detail-content"></div>
+    </section>
+
+    <section id="adapters-view" aria-labelledby="adapters-title" hidden>
+      <div class="heading-row">
+        <div><p class="eyebrow">Condition evaluation</p><h1 id="adapters-title">Adapters</h1></div>
+      </div>
+      <p class="muted">Configure only the four built-in adapters and their allowlisted aliases.</p>
+      <div id="adapter-list" class="admin-grid" aria-live="polite"></div>
+    </section>
+
+    <section id="settings-view" aria-labelledby="settings-title" hidden>
+      <div class="heading-row">
+        <div><p class="eyebrow">Safe runtime configuration</p><h1 id="settings-title">Settings</h1></div>
+      </div>
+      <section class="panel" aria-labelledby="runtime-settings-title">
+        <h2 id="runtime-settings-title">Mutable runtime settings</h2>
+        <div id="runtime-settings" class="table-shell" aria-live="polite"></div>
+      </section>
+      <section class="panel" aria-labelledby="bootstrap-settings-title">
+        <h2 id="bootstrap-settings-title">Read-only bootstrap settings</h2>
+        <div id="bootstrap-settings" class="table-shell" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section id="workloads-view" aria-labelledby="workloads-title" hidden>
+      <div class="heading-row">
+        <div><p class="eyebrow">In-process lifecycle</p><h1 id="workloads-title">Workloads</h1></div>
+      </div>
+      <p class="muted">Lifecycle actions affect MCP and scheduler only. This control plane remains available.</p>
+      <div id="workload-list" class="admin-grid" aria-live="polite"></div>
+    </section>
+
+    <section id="audit-view" aria-labelledby="audit-title" hidden>
+      <div class="heading-row">
+        <div><p class="eyebrow">Immutable administrative history</p><h1 id="audit-title">Administrative audit</h1></div>
+      </div>
+      <div id="admin-events" class="panel table-shell" aria-live="polite"></div>
     </section>
   </main>
 

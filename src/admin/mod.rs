@@ -24,6 +24,7 @@ use self::{
     adapters::{AdapterConfigView, AdapterConfiguration, PublishedAdapters},
     audit::AdminEvent,
     settings::RuntimeSetting,
+    workloads::{WorkloadAction, WorkloadComponent},
 };
 
 /// Stable admin-core failures safe for an authenticated API to classify.
@@ -466,6 +467,36 @@ impl AdminService {
         audit::list(&self.database, after_sequence, limit).await
     }
 
+    /// Appends one redacted workload lifecycle outcome after an authenticated attempt.
+    pub async fn audit_workload_action(
+        &self,
+        component: WorkloadComponent,
+        action: WorkloadAction,
+        actor: &AdminActor,
+        failure_code: Option<&'static str>,
+    ) -> Result<(), AdminError> {
+        let outcome = match failure_code {
+            None => "succeeded",
+            Some("WORKLOAD_CONFLICT") => "rejected",
+            Some(_) => "failed",
+        };
+        let event_type = match action {
+            WorkloadAction::Start => "workload_started",
+            WorkloadAction::Stop => "workload_stopped",
+            WorkloadAction::Restart => "workload_restarted",
+        };
+        audit::append(
+            &self.database,
+            self.clock.as_ref(),
+            self.ids.as_ref(),
+            event_type,
+            actor,
+            outcome,
+            &workload_details(component, failure_code),
+        )
+        .await
+    }
+
     async fn rejected(
         &self,
         event_type: &'static str,
@@ -551,6 +582,20 @@ fn adapter_details(name: &str, known: bool, failure_code: Option<&str>) -> Value
         "adapter_name".to_owned(),
         Value::String(if known { name } else { "[unknown]" }.to_owned()),
     );
+    if let Some(code) = failure_code {
+        details.insert("failure_code".to_owned(), Value::String(code.to_owned()));
+    }
+    Value::Object(details)
+}
+
+fn workload_details(component: WorkloadComponent, failure_code: Option<&str>) -> Value {
+    let component = match component {
+        WorkloadComponent::Mcp => "mcp",
+        WorkloadComponent::Scheduler => "scheduler",
+        WorkloadComponent::All => "all",
+    };
+    let mut details =
+        serde_json::Map::from_iter([("component".to_owned(), Value::String(component.to_owned()))]);
     if let Some(code) = failure_code {
         details.insert("failure_code".to_owned(), Value::String(code.to_owned()));
     }

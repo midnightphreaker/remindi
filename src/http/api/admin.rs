@@ -1,188 +1,65 @@
-//! Composable authenticated administration API routes.
-//!
-//! The shared router must attach WebUI authentication, same-origin, CSRF, and
-//! [`AdminApiContext`] before merging these routes.
-
-use std::sync::Arc;
+//! Authenticated administration API routes below `/api/v1`.
 
 use axum::{
-    Extension, Json, Router,
+    Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{
-        HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
     },
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, patch, post},
 };
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
 use crate::admin::{
-    AdminActor, AdminError, AdminService, BootstrapView,
-    adapters::{AdapterConfigView, AdapterConfiguration},
-    audit::AdminEvent,
-    backup::{BackupError, BackupManager, BackupRecord, BackupSource},
-    settings::RuntimeSetting,
+    AdminActor, AdminError,
+    adapters::AdapterConfiguration,
+    backup::{BackupError, BackupRecord, BackupSource},
+    workloads::{WorkloadAction, WorkloadComponent, WorkloadError},
 };
 
-/// State owned by the authenticated administration route group.
-#[derive(Clone)]
-pub struct AdminApiState {
-    service: Arc<AdminService>,
-    backups: Option<Arc<BackupManager>>,
-}
+use super::{WebApiState, actor, api_error, authorize_mutation, success};
 
-impl AdminApiState {
-    #[must_use]
-    pub fn new(service: Arc<AdminService>) -> Self {
-        Self {
-            service,
-            backups: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_backups(mut self, backups: Arc<BackupManager>) -> Self {
-        self.backups = Some(backups);
-        self
-    }
-}
-
-/// Authenticated actor and deterministic request ID inserted by WebUI middleware.
-#[derive(Clone, Debug)]
-pub struct AdminApiContext {
-    actor: AdminActor,
-    request_id: String,
-}
-
-impl AdminApiContext {
-    pub fn new(actor_id: impl Into<String>, request_id: String) -> Result<Self, AdminError> {
-        let actor = AdminActor::new(actor_id, Some(request_id.clone()))?;
-        Ok(Self { actor, request_id })
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateRuntimeSettingRequest {
+    value: i64,
+    expected_version: i64,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UpdateRuntimeSettingRequest {
-    pub value: i64,
-    pub expected_version: i64,
+struct UpdateAdapterRequest {
+    enabled: bool,
+    configuration: AdapterConfiguration,
+    expected_version: i64,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UpdateAdapterRequest {
-    pub enabled: bool,
-    pub configuration: AdapterConfiguration,
-    pub expected_version: i64,
+struct AuditQuery {
+    after_sequence: Option<i64>,
+    limit: Option<u16>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuditQuery {
-    pub after_sequence: Option<i64>,
-    pub limit: Option<u16>,
-}
+struct WorkloadMutation {}
 
-#[derive(Serialize)]
-struct Success<T> {
-    ok: bool,
-    request_id: String,
-    data: T,
-}
-
-#[derive(Serialize)]
-struct ErrorEnvelope {
-    ok: bool,
-    request_id: String,
-    error: ErrorBody,
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    code: &'static str,
-    message: &'static str,
-    retryable: bool,
-}
-
-struct ApiError {
-    error: ApiFailure,
-    request_id: String,
-}
-
-enum ApiFailure {
-    Admin(AdminError),
-    Backup(BackupError),
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, code, message, retryable) = match self.error {
-            ApiFailure::Admin(AdminError::Validation) => (
-                StatusCode::BAD_REQUEST,
-                "VALIDATION_ERROR",
-                "Administrative input failed validation.",
-                false,
-            ),
-            ApiFailure::Admin(AdminError::VersionConflict) => (
-                StatusCode::CONFLICT,
-                "VERSION_CONFLICT",
-                "The expected administrative version is stale.",
-                true,
-            ),
-            ApiFailure::Backup(BackupError::Invalid) => (
-                StatusCode::BAD_REQUEST,
-                "BACKUP_INVALID",
-                "The backup failed verification.",
-                false,
-            ),
-            ApiFailure::Backup(BackupError::LimitExceeded) => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "LIMIT_EXCEEDED",
-                "The backup upload exceeded its configured limit.",
-                false,
-            ),
-            ApiFailure::Backup(BackupError::NotFound) => (
-                StatusCode::NOT_FOUND,
-                "NOT_FOUND",
-                "The requested backup was not found.",
-                false,
-            ),
-            ApiFailure::Admin(AdminError::Database)
-            | ApiFailure::Backup(BackupError::Database | BackupError::Io) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "The administrative operation failed.",
-                false,
-            ),
-        };
-        (
-            status,
-            Json(ErrorEnvelope {
-                ok: false,
-                request_id: self.request_id,
-                error: ErrorBody {
-                    code,
-                    message,
-                    retryable,
-                },
-            }),
-        )
-            .into_response()
-    }
-}
-
-/// Returns routes for integration below `/api/v1`.
-pub fn routes() -> Router<AdminApiState> {
+/// Returns the complete administration route group for a configured WebUI API.
+pub fn routes() -> Router<WebApiState> {
     Router::new()
         .route("/settings/bootstrap", get(bootstrap))
         .route("/settings", get(runtime_settings))
         .route("/settings/{key}", patch(update_runtime_setting))
         .route("/adapters", get(adapter_configs))
         .route("/adapters/{name}", patch(update_adapter))
+        .route("/workloads", get(workloads))
+        .route("/workloads/{component}/{action}", post(transition_workload))
         .route("/admin-events", get(admin_events))
         .route("/backups", get(backups).post(create_backup))
         .route(
@@ -193,212 +70,272 @@ pub fn routes() -> Router<AdminApiState> {
         .route("/backups/{id}/download", get(download_backup))
 }
 
-async fn bootstrap(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-) -> Json<Success<BootstrapView>> {
-    Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data: state.service.bootstrap_view(),
-    })
+async fn bootstrap(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    success(&headers, service.bootstrap_view())
 }
 
-async fn runtime_settings(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-) -> Result<Json<Success<Vec<RuntimeSetting>>>, ApiError> {
-    let data = state
-        .service
-        .runtime_settings()
-        .await
-        .map_err(|error| api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
+async fn runtime_settings(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    match service.runtime_settings().await {
+        Ok(data) => success(&headers, data),
+        Err(error) => admin_error(&headers, error),
+    }
 }
 
 async fn update_runtime_setting(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
     Path(key): Path<String>,
     Json(request): Json<UpdateRuntimeSettingRequest>,
-) -> Result<Json<Success<RuntimeSetting>>, ApiError> {
-    let data = state
-        .service
-        .update_runtime_setting(
-            &key,
-            request.value,
-            request.expected_version,
-            &context.actor,
-        )
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::PATCH) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    match service
+        .update_runtime_setting(&key, request.value, request.expected_version, &actor)
         .await
-        .map_err(|error| api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
+    {
+        Ok(data) => success(&headers, data),
+        Err(error) => admin_error(&headers, error),
+    }
 }
 
-async fn adapter_configs(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-) -> Result<Json<Success<Vec<AdapterConfigView>>>, ApiError> {
-    let data = state
-        .service
-        .adapter_configs()
-        .await
-        .map_err(|error| api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
+async fn adapter_configs(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    match service.adapter_configs().await {
+        Ok(data) => success(&headers, data),
+        Err(error) => admin_error(&headers, error),
+    }
 }
 
 async fn update_adapter(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(request): Json<UpdateAdapterRequest>,
-) -> Result<Json<Success<AdapterConfigView>>, ApiError> {
-    let data = state
-        .service
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::PATCH) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    match service
         .update_adapter(
             &name,
             request.enabled,
             request.configuration,
             request.expected_version,
-            &context.actor,
+            &actor,
         )
         .await
-        .map_err(|error| api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
-}
-
-async fn admin_events(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-    Query(query): Query<AuditQuery>,
-) -> Result<Json<Success<Vec<AdminEvent>>>, ApiError> {
-    let data = state
-        .service
-        .admin_events(query.after_sequence, query.limit.unwrap_or(100))
-        .await
-        .map_err(|error| api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
-}
-
-fn api_error(error: AdminError, context: &AdminApiContext) -> ApiError {
-    ApiError {
-        error: ApiFailure::Admin(error),
-        request_id: context.request_id.clone(),
+    {
+        Ok(data) => success(&headers, data),
+        Err(error) => admin_error(&headers, error),
     }
 }
 
-async fn backups(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-) -> Result<Json<Success<Vec<BackupRecord>>>, ApiError> {
-    let data = backup_manager(&state, &context)?
-        .list()
-        .await
-        .map_err(|error| backup_api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
+async fn workloads(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(workloads) = state.workloads() else {
+        return unavailable(&headers);
+    };
+    success(&headers, workloads.status())
 }
 
-async fn create_backup(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
-) -> Result<(StatusCode, Json<Success<BackupRecord>>), ApiError> {
-    let data = backup_manager(&state, &context)?
-        .create(BackupSource::Manual, &context.actor)
+async fn transition_workload(
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
+    Path((component, action)): Path<(WorkloadComponent, WorkloadAction)>,
+    Json(_request): Json<WorkloadMutation>,
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::POST) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let (Some(service), Some(workloads)) = (state.administration(), state.workloads()) else {
+        return unavailable(&headers);
+    };
+    let result = workloads
+        .transition(component, action, actor.actor_id(), actor.request_id())
+        .await;
+    let failure_code = match &result {
+        Ok(_) => None,
+        Err(WorkloadError::TransitionConflict) => Some("WORKLOAD_CONFLICT"),
+        Err(_) => Some("INTERNAL_ERROR"),
+    };
+    if let Err(error) = service
+        .audit_workload_action(component, action, &actor, failure_code)
         .await
-        .map_err(|error| backup_api_error(error, &context))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(Success {
-            ok: true,
-            request_id: context.request_id,
-            data,
-        }),
-    ))
+    {
+        return admin_error(&headers, error);
+    }
+    match result {
+        Ok(data) => success(&headers, data),
+        Err(WorkloadError::TransitionConflict) => api_error(
+            &headers,
+            StatusCode::CONFLICT,
+            "WORKLOAD_CONFLICT",
+            "Another workload lifecycle operation is active.",
+            true,
+            None,
+        ),
+        Err(_) => api_error(
+            &headers,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "The workload transition failed.",
+            false,
+            None,
+        ),
+    }
+}
+
+async fn admin_events(
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(service) = state.administration() else {
+        return unavailable(&headers);
+    };
+    match service
+        .admin_events(query.after_sequence, query.limit.unwrap_or(100))
+        .await
+    {
+        Ok(data) => success(&headers, data),
+        Err(error) => admin_error(&headers, error),
+    }
+}
+
+async fn backups(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(backups) = state.backups() else {
+        return unavailable(&headers);
+    };
+    match backups.list().await {
+        Ok(data) => success(&headers, data),
+        Err(error) => backup_error(&headers, error),
+    }
+}
+
+async fn create_backup(State(state): State<WebApiState>, headers: HeaderMap) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::POST) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let Some(backups) = state.backups() else {
+        return unavailable(&headers);
+    };
+    match backups.create(BackupSource::Manual, &actor).await {
+        Ok(data) => created(&headers, data),
+        Err(error) => backup_error(&headers, error),
+    }
 }
 
 async fn upload_backup(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Success<BackupRecord>>), ApiError> {
-    let maximum = state
-        .service
-        .runtime_settings()
-        .await
-        .map_err(|error| api_error(error, &context))?
-        .into_iter()
-        .find(|setting| setting.key == "backups.upload_max_bytes")
-        .and_then(|setting| u64::try_from(setting.value).ok())
-        .ok_or_else(|| api_error(AdminError::Database, &context))?;
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(|_| backup_api_error(BackupError::Invalid, &context))?
-        .filter(|field| {
-            field.name() == Some("file")
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::POST) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let (Some(service), Some(backups)) = (state.administration(), state.backups()) else {
+        return unavailable(&headers);
+    };
+    let maximum = match service.runtime_settings().await {
+        Ok(settings) => settings
+            .into_iter()
+            .find(|setting| setting.key == "backups.upload_max_bytes")
+            .and_then(|setting| u64::try_from(setting.value).ok()),
+        Err(error) => return admin_error(&headers, error),
+    };
+    let Some(maximum) = maximum else {
+        return admin_error(&headers, AdminError::Database);
+    };
+    let field = match multipart.next_field().await {
+        Ok(Some(field))
+            if field.name() == Some("file")
                 && matches!(
                     field.content_type(),
                     Some("application/vnd.sqlite3" | "application/x-sqlite3")
-                )
-        })
-        .ok_or_else(|| backup_api_error(BackupError::Invalid, &context))?;
-    let data = backup_manager(&state, &context)?
+                ) =>
+        {
+            field
+        }
+        _ => return backup_error(&headers, BackupError::Invalid),
+    };
+    match backups
         .upload(
-            field.map(|chunk| chunk.map_err(|_| ())),
+            field.map(|chunk| chunk.map_err(|_| BackupError::Invalid)),
             maximum,
-            &context.actor,
+            &actor,
         )
         .await
-        .map_err(|error| backup_api_error(error, &context))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(Success {
-            ok: true,
-            request_id: context.request_id,
-            data,
-        }),
-    ))
+    {
+        Ok(data) => created(&headers, data),
+        Err(error) => backup_error(&headers, error),
+    }
 }
 
 async fn download_backup(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Response, ApiError> {
-    let (record, path) = backup_manager(&state, &context)?
-        .download(&id)
-        .await
-        .map_err(|error| backup_api_error(error, &context))?;
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| backup_api_error(BackupError::Io, &context))?;
+) -> Response {
+    if let Err(response) = actor(&state, &headers) {
+        return *response;
+    }
+    let Some(backups) = state.backups() else {
+        return unavailable(&headers);
+    };
+    let (record, path) = match backups.download(&id).await {
+        Ok(download) => download,
+        Err(error) => return backup_error(&headers, error),
+    };
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return backup_error(&headers, BackupError::Io),
+    };
     let disposition =
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", record.file_name))
-            .map_err(|_| backup_api_error(BackupError::Database, &context))?;
+        match HeaderValue::from_str(&format!("attachment; filename=\"{}\"", record.file_name)) {
+            Ok(value) => value,
+            Err(_) => return backup_error(&headers, BackupError::Database),
+        };
+    let digest = match HeaderValue::from_str(&format!("sha-256={}", record.sha256)) {
+        Ok(value) => value,
+        Err(_) => return backup_error(&headers, BackupError::Database),
+    };
     let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -407,43 +344,117 @@ async fn download_backup(
     response
         .headers_mut()
         .insert(CONTENT_DISPOSITION, disposition);
-    response.headers_mut().insert(
-        "digest",
-        HeaderValue::from_str(&format!("sha-256={}", record.sha256))
-            .map_err(|_| backup_api_error(BackupError::Database, &context))?,
-    );
-    Ok(response)
+    response.headers_mut().insert("digest", digest);
+    response
 }
 
 async fn verify_backup(
-    State(state): State<AdminApiState>,
-    Extension(context): Extension<AdminApiContext>,
+    State(state): State<WebApiState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Success<BackupRecord>>, ApiError> {
-    let data = backup_manager(&state, &context)?
-        .verify(&id, &context.actor)
-        .await
-        .map_err(|error| backup_api_error(error, &context))?;
-    Ok(Json(Success {
-        ok: true,
-        request_id: context.request_id,
-        data,
-    }))
-}
-
-fn backup_manager<'a>(
-    state: &'a AdminApiState,
-    context: &AdminApiContext,
-) -> Result<&'a BackupManager, ApiError> {
-    state
-        .backups
-        .as_deref()
-        .ok_or_else(|| backup_api_error(BackupError::Database, context))
-}
-
-fn backup_api_error(error: BackupError, context: &AdminApiContext) -> ApiError {
-    ApiError {
-        error: ApiFailure::Backup(error),
-        request_id: context.request_id.clone(),
+) -> Response {
+    let actor = match admin_actor(&state, &headers, &Method::POST) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let Some(backups) = state.backups() else {
+        return unavailable(&headers);
+    };
+    match backups.verify(&id, &actor).await {
+        Ok(data) => success(&headers, data),
+        Err(error) => backup_error(&headers, error),
     }
+}
+
+fn created(headers: &HeaderMap, data: BackupRecord) -> Response {
+    let mut response = success(headers, data);
+    *response.status_mut() = StatusCode::CREATED;
+    response
+}
+
+fn admin_actor(
+    state: &WebApiState,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<AdminActor, Box<Response>> {
+    let actor = authorize_mutation(state, headers, method)?;
+    AdminActor::new(actor.actor_id, actor.request_id)
+        .map_err(|error| Box::new(admin_error(headers, error)))
+}
+
+fn admin_error(headers: &HeaderMap, error: AdminError) -> Response {
+    match error {
+        AdminError::Validation => api_error(
+            headers,
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "Administrative input failed validation.",
+            false,
+            None,
+        ),
+        AdminError::VersionConflict => api_error(
+            headers,
+            StatusCode::CONFLICT,
+            "VERSION_CONFLICT",
+            "The expected administrative version is stale.",
+            true,
+            None,
+        ),
+        AdminError::Database => api_error(
+            headers,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "The administrative operation failed.",
+            false,
+            None,
+        ),
+    }
+}
+
+fn backup_error(headers: &HeaderMap, error: BackupError) -> Response {
+    match error {
+        BackupError::Invalid => api_error(
+            headers,
+            StatusCode::BAD_REQUEST,
+            "BACKUP_INVALID",
+            "The backup failed verification.",
+            false,
+            None,
+        ),
+        BackupError::LimitExceeded => api_error(
+            headers,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "LIMIT_EXCEEDED",
+            "The backup upload exceeded its configured limit.",
+            false,
+            None,
+        ),
+        BackupError::NotFound => api_error(
+            headers,
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "The requested backup was not found.",
+            false,
+            None,
+        ),
+        BackupError::Database | BackupError::Io => api_error(
+            headers,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "The administrative operation failed.",
+            false,
+            None,
+        ),
+    }
+}
+
+fn unavailable(headers: &HeaderMap) -> Response {
+    api_error(
+        headers,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+        "The requested resource was not found.",
+        false,
+        None,
+    )
 }

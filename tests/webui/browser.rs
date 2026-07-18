@@ -36,6 +36,10 @@ async fn embedded_ui_serves_semantic_dependency_free_application() {
         r#"<dialog id="login-dialog""#,
         r#"aria-live="polite""#,
         r#"<script type="module" src="/assets/app.js"></script>"#,
+        r#"id="adapters-view""#,
+        r#"id="settings-view""#,
+        r#"id="workloads-view""#,
+        r#"id="audit-view""#,
     ] {
         assert!(html.contains(required), "missing {required}");
     }
@@ -65,6 +69,10 @@ async fn assets_cover_all_flows_accessibility_and_mobile_states() {
         "/snooze",
         "/cancel",
         "/history",
+        "/settings",
+        "/adapters",
+        "/workloads",
+        "/admin-events",
     ] {
         assert!(js.contains(route), "missing API flow {route}");
     }
@@ -76,6 +84,10 @@ async fn assets_cover_all_flows_accessibility_and_mobile_states() {
         "restoreFocus",
         "aria-invalid",
         "URLSearchParams",
+        "data-setting-form",
+        "data-adapter-form",
+        "data-workload-action",
+        "window.confirm",
     ] {
         assert!(js.contains(behavior), "missing behavior {behavior}");
     }

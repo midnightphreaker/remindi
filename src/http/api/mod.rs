@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::{
+    admin::{AdminService, backup::BackupManager, workloads::WorkloadController},
     auth::{
         csrf::{self, CSRF_HEADER},
         web_session::{LoginError, SessionError, WebMode, WebSessionManager},
@@ -21,6 +22,7 @@ use crate::{
     remindi::{Actor, ActorType, RemindiService, ServiceError},
 };
 
+pub mod admin;
 pub mod remindi;
 
 const JSON_BODY_LIMIT: usize = 1024 * 1024;
@@ -29,12 +31,40 @@ const JSON_BODY_LIMIT: usize = 1024 * 1024;
 pub struct WebApiState {
     sessions: WebSessionManager,
     service: Arc<RemindiService>,
+    administration: Option<Arc<AdminService>>,
+    workloads: Option<Arc<WorkloadController>>,
+    backups: Option<Arc<BackupManager>>,
 }
 
 impl WebApiState {
     #[must_use]
     pub fn new(sessions: WebSessionManager, service: Arc<RemindiService>) -> Self {
-        Self { sessions, service }
+        Self {
+            sessions,
+            service,
+            administration: None,
+            workloads: None,
+            backups: None,
+        }
+    }
+
+    /// Attaches the authenticated administration and in-process lifecycle seams.
+    #[must_use]
+    pub fn with_administration(
+        mut self,
+        administration: Arc<AdminService>,
+        workloads: Arc<WorkloadController>,
+    ) -> Self {
+        self.administration = Some(administration);
+        self.workloads = Some(workloads);
+        self
+    }
+
+    /// Attaches verified backup administration to the authenticated API.
+    #[must_use]
+    pub fn with_backups(mut self, backups: Arc<BackupManager>) -> Self {
+        self.backups = Some(backups);
+        self
     }
 
     #[must_use]
@@ -46,6 +76,18 @@ impl WebApiState {
     pub fn service(&self) -> &RemindiService {
         &self.service
     }
+
+    pub(crate) fn administration(&self) -> Option<&AdminService> {
+        self.administration.as_deref()
+    }
+
+    pub(crate) fn workloads(&self) -> Option<&WorkloadController> {
+        self.workloads.as_deref()
+    }
+
+    pub(crate) fn backups(&self) -> Option<&BackupManager> {
+        self.backups.as_deref()
+    }
 }
 
 /// Builds the complete Task 9 route subtree, ready to nest at `/api/v1`.
@@ -53,10 +95,15 @@ pub fn router(state: WebApiState) -> Router {
     if state.sessions.mode() == WebMode::Disabled {
         return Router::new();
     }
-    Router::new()
+    let administration = state.administration.is_some() && state.workloads.is_some();
+    let mut router = Router::new()
         .route("/session", get(session))
         .route("/auth/login", post(login))
-        .route("/auth/logout", post(logout))
+        .route("/auth/logout", post(logout));
+    if administration {
+        router = router.merge(admin::routes());
+    }
+    router
         .merge(remindi::router())
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .layer(middleware::from_fn(security_headers))
@@ -331,7 +378,7 @@ fn csrf_error(headers: &HeaderMap) -> Response {
     )
 }
 
-fn api_error(
+pub(crate) fn api_error(
     headers: &HeaderMap,
     status: StatusCode,
     code: &'static str,

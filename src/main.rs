@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use remindi::{
-    admin::workloads::WorkloadController,
+    admin::{
+        AdminService, backup::BackupManager, settings::RuntimeSetting,
+        workloads::WorkloadController,
+    },
     app::{AppState, run, shutdown_signal},
     auth::web_session::{WebMode, WebSessionManager},
     clock::{SystemClock, UuidV7Generator},
@@ -12,7 +15,6 @@ use remindi::{
     mcp::server::McpWorkload,
     remindi::RemindiService,
     scheduler::{AdapterProvider, Scheduler, SchedulerConfig, SchedulerWorkload},
-    triggers::adapters::AdapterRegistry,
     webui::{AssetOverrides, WebUiAssets},
 };
 use secrecy::ExposeSecret;
@@ -47,7 +49,6 @@ async fn main() -> anyhow::Result<()> {
         state.clock_shared(),
         state.ids_shared(),
     ));
-    let web_api = WebApiState::new(web_sessions, web_service);
     let webui_assets = if state.bootstrap().webui_enabled() {
         Some(Arc::new(
             WebUiAssets::load(
@@ -76,8 +77,21 @@ async fn main() -> anyhow::Result<()> {
         state.clock_shared(),
         state.ids_shared(),
     ));
-    let adapters: Arc<dyn AdapterProvider> =
-        Arc::new(AdapterRegistry::disabled(state.clock_shared()));
+    let administration = Arc::new(
+        AdminService::load(
+            Arc::clone(&database),
+            state.bootstrap_shared(),
+            state.clock_shared(),
+            state.ids_shared(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("administration startup failed"))?,
+    );
+    let runtime_settings = administration
+        .runtime_settings()
+        .await
+        .map_err(|_| anyhow::anyhow!("runtime settings startup failed"))?;
+    let adapters: Arc<dyn AdapterProvider> = Arc::new(administration.adapters());
     let scheduler = Arc::new(
         Scheduler::new(
             Arc::clone(&database),
@@ -86,10 +100,23 @@ async fn main() -> anyhow::Result<()> {
             state.clock_shared(),
             format!("process-{}", state.ids().next_id().simple()),
             SchedulerConfig {
-                poll_interval: std::time::Duration::from_secs(30),
-                lease_duration: std::time::Duration::from_secs(90),
-                adapter_timeout: std::time::Duration::from_secs(5),
-                adapter_concurrency: 8,
+                poll_interval: std::time::Duration::from_secs(runtime_setting(
+                    &runtime_settings,
+                    "scheduler.poll_interval_seconds",
+                )?),
+                lease_duration: std::time::Duration::from_secs(runtime_setting(
+                    &runtime_settings,
+                    "scheduler.lease_seconds",
+                )?),
+                adapter_timeout: std::time::Duration::from_secs(runtime_setting(
+                    &runtime_settings,
+                    "adapters.timeout_seconds",
+                )?),
+                adapter_concurrency: usize::try_from(runtime_setting(
+                    &runtime_settings,
+                    "adapters.max_concurrency",
+                )?)
+                .context("adapter concurrency is too large")?,
                 candidate_batch_size: 200,
             },
         )
@@ -106,6 +133,20 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("workload controller startup failed")?,
     );
+    let backups = Arc::new(
+        BackupManager::open(
+            Arc::clone(&database),
+            state.bootstrap().backup_directory(),
+            state.bootstrap().owner_id(),
+            state.clock_shared(),
+            state.ids_shared(),
+        )
+        .await
+        .context("backup administration startup failed")?,
+    );
+    let web_api = WebApiState::new(web_sessions, web_service)
+        .with_administration(Arc::clone(&administration), Arc::clone(&workloads))
+        .with_backups(Arc::clone(&backups));
     let mut state = state
         .with_mcp(Arc::clone(&mcp))
         .with_web_api(web_api)
@@ -131,10 +172,21 @@ async fn main() -> anyhow::Result<()> {
     drop(workloads);
     drop(mcp);
     drop(scheduler_workload);
+    drop(administration);
+    drop(backups);
     Arc::try_unwrap(database)
         .map_err(|_| anyhow::anyhow!("database still has active application references"))?
         .close()
         .await
         .context("database shutdown failed")?;
     result
+}
+
+fn runtime_setting(settings: &[RuntimeSetting], key: &str) -> anyhow::Result<u64> {
+    let value = settings
+        .iter()
+        .find(|setting| setting.key == key)
+        .with_context(|| format!("required runtime setting `{key}` is missing"))?
+        .value;
+    u64::try_from(value).with_context(|| format!("runtime setting `{key}` is invalid"))
 }

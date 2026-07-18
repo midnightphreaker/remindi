@@ -95,6 +95,12 @@ impl AppState {
         &self.bootstrap
     }
 
+    /// Returns the process-owned bootstrap configuration.
+    #[must_use]
+    pub fn bootstrap_shared(&self) -> Arc<BootstrapConfig> {
+        Arc::clone(&self.bootstrap)
+    }
+
     /// Returns the configured clock seam.
     #[must_use]
     pub fn clock(&self) -> &dyn Clock {

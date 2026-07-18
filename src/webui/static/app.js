@@ -10,6 +10,9 @@ const state = {
   restoreFocus: null,
   cursor: null,
   nextCursor: null,
+  adapters: [],
+  settings: [],
+  workloads: [],
 };
 
 const elements = {
@@ -17,6 +20,10 @@ const elements = {
   dashboard: document.querySelector("#dashboard-view"),
   items: document.querySelector("#items-view"),
   detail: document.querySelector("#detail-view"),
+  adaptersView: document.querySelector("#adapters-view"),
+  settingsView: document.querySelector("#settings-view"),
+  workloadsView: document.querySelector("#workloads-view"),
+  auditView: document.querySelector("#audit-view"),
   summary: document.querySelector("#summary"),
   attention: document.querySelector("#attention-list"),
   itemList: document.querySelector("#item-list"),
@@ -33,6 +40,11 @@ const elements = {
   operationSubmit: document.querySelector("#operation-submit"),
   conflictDialog: document.querySelector("#conflict-dialog"),
   detailContent: document.querySelector("#detail-content"),
+  adapterList: document.querySelector("#adapter-list"),
+  runtimeSettings: document.querySelector("#runtime-settings"),
+  bootstrapSettings: document.querySelector("#bootstrap-settings"),
+  workloadList: document.querySelector("#workload-list"),
+  adminEvents: document.querySelector("#admin-events"),
 };
 
 class ApiError extends Error {
@@ -106,6 +118,11 @@ function bindEvents() {
       if (action === "details") await showDetail(id);
       else openOperation(action, id, event.target.closest("button"));
     }
+    const workload = event.target.closest("[data-workload-action]");
+    if (workload) {
+      event.preventDefault();
+      await controlWorkload(workload.dataset.component, workload.dataset.workloadAction);
+    }
     if (event.target.closest("[data-close]")) closeOperation();
   });
   window.addEventListener("popstate", () => load());
@@ -126,6 +143,10 @@ function bindEvents() {
     loadItems();
   });
   elements.operationDialog.addEventListener("close", restoreFocus);
+  document.addEventListener("submit", async (event) => {
+    if (event.target.matches("[data-setting-form]")) await saveSetting(event);
+    if (event.target.matches("[data-adapter-form]")) await saveAdapter(event);
+  });
   elements.conflictDialog.addEventListener("close", async () => {
     if (elements.conflictDialog.returnValue === "reload" && state.selected?.id) await showDetail(state.selected.id);
     restoreFocus();
@@ -169,6 +190,10 @@ async function load() {
   setView(view);
   if (params.get("item")) await showDetail(params.get("item"), false);
   else if (view === "items") await loadItems();
+  else if (view === "adapters") await loadAdapters();
+  else if (view === "settings") await loadSettings();
+  else if (view === "workloads") await loadWorkloads();
+  else if (view === "audit") await loadAudit();
   else await loadDashboard();
 }
 
@@ -176,10 +201,165 @@ function setView(view) {
   elements.dashboard.hidden = view !== "dashboard";
   elements.items.hidden = view !== "items";
   elements.detail.hidden = view !== "detail";
+  elements.adaptersView.hidden = view !== "adapters";
+  elements.settingsView.hidden = view !== "settings";
+  elements.workloadsView.hidden = view !== "workloads";
+  elements.auditView.hidden = view !== "audit";
   document.querySelectorAll("[data-nav]").forEach((link) => {
     if (link.dataset.nav === view) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
+}
+
+async function loadSettings() {
+  try {
+    const [settings, bootstrap] = await Promise.all([
+      api("/settings"),
+      api("/settings/bootstrap"),
+    ]);
+    state.settings = settings;
+    elements.runtimeSettings.innerHTML = `<table>
+      <thead><tr><th>Setting</th><th>Value</th><th>Activation</th><th>Action</th></tr></thead>
+      <tbody>${settings.map((setting) => `<tr>
+        <td data-label="Setting"><code>${escapeHtml(setting.key)}</code></td>
+        <td data-label="Value"><form data-setting-form data-key="${escapeHtml(setting.key)}">
+          <input name="value" type="number" min="${escapeHtml(setting.minimum)}" ${setting.maximum == null ? "" : `max="${escapeHtml(setting.maximum)}"`} value="${escapeHtml(setting.value)}" required>
+          <input name="expected_version" type="hidden" value="${escapeHtml(setting.version)}">
+        </form></td>
+        <td data-label="Activation">${setting.restart_required ? "Workload restart required" : "Immediate"}</td>
+        <td data-label="Action"><button class="button" type="submit" form="${settingFormId(setting.key)}">Save</button></td>
+      </tr>`).join("")}</tbody>
+    </table>`;
+    elements.runtimeSettings.querySelectorAll("[data-setting-form]").forEach((form) => {
+      form.id = settingFormId(form.dataset.key);
+    });
+    elements.bootstrapSettings.innerHTML = `<table>
+      <thead><tr><th>Bootstrap setting</th><th>Effective value</th><th>Mutable</th></tr></thead>
+      <tbody>${bootstrap.settings.map((setting) => `<tr>
+        <td data-label="Setting"><code>${escapeHtml(setting.name)}</code></td>
+        <td data-label="Effective value">${escapeHtml(setting.effective_value ?? (setting.configured ? "[configured]" : "Not configured"))}</td>
+        <td data-label="Mutable">${setting.mutable ? "Yes" : "No"}</td>
+      </tr>`).join("")}</tbody>
+    </table>`;
+  } catch (error) { showPageError(error); }
+}
+
+function settingFormId(key) {
+  return `setting-${String(key).replaceAll(".", "-")}`;
+}
+
+async function saveSetting(event) {
+  event.preventDefault();
+  const form = event.target;
+  const values = new FormData(form);
+  try {
+    await api(`/settings/${encodeURIComponent(form.dataset.key)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        value: Number(values.get("value")),
+        expected_version: Number(values.get("expected_version")),
+      }),
+    });
+    announce("Runtime setting saved.");
+    await loadSettings();
+  } catch (error) {
+    if (error.code === "VERSION_CONFLICT") {
+      announce("The setting changed elsewhere. Latest values were reloaded.", true);
+      await loadSettings();
+    } else showPageError(error);
+  }
+}
+
+async function loadAdapters() {
+  try {
+    state.adapters = await api("/adapters");
+    elements.adapterList.innerHTML = state.adapters.map((adapter) => `<form class="panel" data-adapter-form data-name="${escapeHtml(adapter.adapter_name)}">
+      <div class="panel-heading"><div><p class="eyebrow">${escapeHtml(adapter.configuration.type)}</p><h2>${escapeHtml(adapter.adapter_name)}</h2></div>
+        <label><input name="enabled" type="checkbox" ${adapter.enabled ? "checked" : ""}> Enabled</label></div>
+      <div class="field">
+        <label for="adapter-${escapeHtml(adapter.adapter_name)}">Typed configuration</label>
+        <textarea id="adapter-${escapeHtml(adapter.adapter_name)}" name="configuration" rows="10" spellcheck="false" required>${escapeHtml(JSON.stringify(adapter.configuration, null, 2))}</textarea>
+        <small class="muted">Only fields valid for this adapter type and allowlisted aliases are accepted.</small>
+      </div>
+      <input name="expected_version" type="hidden" value="${escapeHtml(adapter.version)}">
+      <button class="button primary" type="submit">Save ${escapeHtml(adapter.adapter_name)}</button>
+    </form>`).join("");
+  } catch (error) { showPageError(error); }
+}
+
+async function saveAdapter(event) {
+  event.preventDefault();
+  const form = event.target;
+  const values = new FormData(form);
+  let configuration;
+  try {
+    configuration = JSON.parse(values.get("configuration"));
+  } catch (_) {
+    announce("Adapter configuration must be valid JSON.", true);
+    form.elements.configuration.focus();
+    return;
+  }
+  try {
+    await api(`/adapters/${encodeURIComponent(form.dataset.name)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        enabled: form.elements.enabled.checked,
+        configuration,
+        expected_version: Number(values.get("expected_version")),
+      }),
+    });
+    announce("Adapter configuration published.");
+    await loadAdapters();
+  } catch (error) {
+    if (error.code === "VERSION_CONFLICT") {
+      announce("The adapter changed elsewhere. Latest values were reloaded.", true);
+      await loadAdapters();
+    } else showPageError(error);
+  }
+}
+
+async function loadWorkloads() {
+  try {
+    state.workloads = await api("/workloads");
+    elements.workloadList.innerHTML = state.workloads.map((workload) => `<article class="panel">
+      <div class="panel-heading"><div><p class="eyebrow">${escapeHtml(workload.desired)} desired</p><h2>${escapeHtml(workload.component)}</h2></div>
+        <span class="badge ${escapeHtml(workload.actual)}">${escapeHtml(workload.actual)}</span></div>
+      ${workload.last_error ? `<p class="inline-error">${escapeHtml(workload.last_error)}</p>` : ""}
+      <div class="button-row">
+        <button class="button" data-workload-action="start" data-component="${escapeHtml(workload.component)}">Start</button>
+        <button class="button danger" data-workload-action="stop" data-component="${escapeHtml(workload.component)}">Stop</button>
+        <button class="button" data-workload-action="restart" data-component="${escapeHtml(workload.component)}">Restart</button>
+      </div>
+    </article>`).join("");
+  } catch (error) { showPageError(error); }
+}
+
+async function controlWorkload(component, action) {
+  if (["stop", "restart"].includes(action) && !window.confirm(`${action} the ${component} workload? The control plane will remain available.`)) return;
+  try {
+    await api(`/workloads/${encodeURIComponent(component)}/${encodeURIComponent(action)}`, {
+      method: "POST",
+      body: "{}",
+    });
+    announce(`${component} ${action} completed.`);
+    await loadWorkloads();
+  } catch (error) { showPageError(error); }
+}
+
+async function loadAudit() {
+  try {
+    const events = await api("/admin-events?limit=200");
+    elements.adminEvents.innerHTML = events.length ? `<table>
+      <thead><tr><th>Time</th><th>Action</th><th>Outcome</th><th>Actor</th><th>Details</th></tr></thead>
+      <tbody>${events.map((event) => `<tr>
+        <td data-label="Time">${escapeHtml(formatDate(event.occurred_at))}</td>
+        <td data-label="Action">${escapeHtml(event.event_type)}</td>
+        <td data-label="Outcome">${escapeHtml(event.outcome)}</td>
+        <td data-label="Actor"><code>${escapeHtml(event.actor_id)}</code></td>
+        <td data-label="Details"><code>${escapeHtml(JSON.stringify(event.details))}</code></td>
+      </tr>`).join("")}</tbody>
+    </table>` : `<div class="empty"><h2>No administrative events</h2><p>Configuration and workload changes will appear here.</p></div>`;
+  } catch (error) { showPageError(error); }
 }
 
 async function loadDashboard() {
