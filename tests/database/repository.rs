@@ -11,8 +11,8 @@ use remindi::{
     db::DatabaseManager,
     remindi::{
         Actor, AddRequest, CheckRequest, CompleteRequest, EvidenceInput, EvidenceSource,
-        EvidenceType, HistoryRequest, LifecycleEvent, ListRequest, Priority, RemindiService,
-        RemindiState, ServiceError, SnoozeRequest, Trigger, UpdateRequest,
+        EvidenceType, HistoryRequest, LifecycleEvent, ListRequest, Priority, Readiness,
+        RemindiService, RemindiState, ServiceError, SnoozeRequest, Trigger, UpdateRequest,
     },
 };
 use serde_json::json;
@@ -337,6 +337,57 @@ async fn check_snooze_and_update_use_cas_and_append_ordered_history() {
         .collect();
     assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(history.items.len(), 5);
+
+    drop(service);
+    Arc::try_unwrap(database)
+        .expect("sole manager")
+        .close()
+        .await
+        .expect("close");
+}
+
+#[tokio::test]
+async fn check_returns_manual_verification_without_include_scheduled() {
+    let directory = std::env::temp_dir().join(format!("remindi-manual-check-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).expect("temp directory");
+    let path = directory.join("remindi.db");
+    let (database, service) = setup_service(&path, "owner-a").await;
+    service
+        .add(
+            &actor(),
+            AddRequest {
+                trigger: Trigger::Condition {
+                    adapter: "http_health".into(),
+                    parameters: json!({"target": "service-api"}),
+                    poll_interval_seconds: Some(300),
+                    manual_check_at: Some(datetime!(2026-07-19 06:00 UTC)),
+                },
+                ..add("manual-create")
+            },
+        )
+        .await
+        .expect("condition item added");
+
+    let checked = service
+        .check(
+            &actor(),
+            CheckRequest {
+                project_id: "project-a".into(),
+                task_id: Some("task-a".into()),
+                session_id: None,
+                task_lineage_id: None,
+                lifecycle_event: LifecycleEvent::Checkpoint,
+                active_goal_ids: vec![],
+                include_scheduled: false,
+                limit: 50,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("manual fallback checked");
+
+    assert_eq!(checked.items.len(), 1);
+    assert_eq!(checked.items[0].readiness, Readiness::ManualVerification);
 
     drop(service);
     Arc::try_unwrap(database)

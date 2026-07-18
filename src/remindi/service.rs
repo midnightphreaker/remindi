@@ -726,9 +726,7 @@ impl RemindiService {
         };
         let mut ready = Vec::new();
         for candidate in listed.items {
-            if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await?
-                && (request.include_scheduled || item.readiness != Readiness::ManualVerification)
-            {
+            if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await? {
                 ready.push(item);
             }
         }
