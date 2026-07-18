@@ -158,6 +158,59 @@ async fn check_paginates_in_required_ready_order_across_all_candidates() {
 }
 
 #[tokio::test]
+async fn check_cursor_returns_zero_grace_ready_items_exactly_once_across_pages() {
+    let (_database, service, _clock) = setup().await;
+    let mut first_request = add_request(
+        "page-exactly-once-first",
+        Trigger::AtTime {
+            at: datetime!(2026-07-18 06:00 UTC),
+        },
+    );
+    first_request.overdue_after_seconds = 0;
+    let first = service
+        .add(&actor(), first_request)
+        .await
+        .expect("first ready item");
+    let mut second_request = add_request(
+        "page-exactly-once-second",
+        Trigger::AtTime {
+            at: datetime!(2026-07-18 06:00 UTC),
+        },
+    );
+    second_request.overdue_after_seconds = 0;
+    let second = service
+        .add(&actor(), second_request)
+        .await
+        .expect("second ready item");
+
+    let first_page = service
+        .check(&actor(), check_request(1))
+        .await
+        .expect("first page");
+    assert_eq!(first_page.items.len(), 1);
+    let mut second_page_request = check_request(1);
+    second_page_request.cursor = first_page.next_cursor;
+    let second_page = service
+        .check(&actor(), second_page_request)
+        .await
+        .expect("second page");
+
+    assert_eq!(second_page.items.len(), 1, "the remaining item was lost");
+    assert_ne!(
+        first_page.items[0].remindi.id, second_page.items[0].remindi.id,
+        "an item was returned more than once"
+    );
+    let mut returned = vec![
+        first_page.items[0].remindi.id,
+        second_page.items[0].remindi.id,
+    ];
+    returned.sort_unstable();
+    let mut expected = vec![first.remindi.id, second.remindi.id];
+    expected.sort_unstable();
+    assert_eq!(returned, expected);
+}
+
+#[tokio::test]
 async fn occurrence_disposition_is_rejected_until_item_is_due_or_overdue() {
     let (_database, service, _clock) = setup().await;
     let mut request = add_request(
