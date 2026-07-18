@@ -546,13 +546,20 @@ normalizes the known historical server-owned fields:
 
 - `prior_next_fire_at`;
 - `snooze_until`;
-- `next_fire_at`;
-- `next_evaluation_at`.
+- `previous_schedule`;
+- `next_schedule`;
+- `before_trigger.next_fire_at`;
+- `before_trigger.next_evaluation_at`;
+- `after_trigger.next_fire_at`;
+- `after_trigger.next_evaluation_at`;
+- root `next_fire_at`;
+- root `next_evaluation_at`.
 
-For one of these keys, the compatibility converter accepts either an already
-formatted RFC 3339 string, `null`, or the legacy component array accepted by
-the pinned `time` crate. It returns the canonical string or a serialization
-error. It never mutates the stored row.
+For one of these exact event-owned paths, the compatibility converter accepts
+either an already formatted RFC 3339 string, `null`, or the legacy component
+array accepted by the pinned `time` crate. It returns the canonical string or
+a serialization error. It never mutates the stored row and does not perform a
+generic recursive key walk.
 
 The converter does not walk or reinterpret condition `parameters`, evidence
 `metadata`, links, or other caller-supplied opaque JSON. This prevents a

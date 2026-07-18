@@ -216,6 +216,21 @@ fn response_envelopes_have_exact_success_and_error_fields() {
 }
 
 #[test]
+fn list_and_history_output_schemas_describe_timestamps_as_date_time_strings() {
+    let tools = remindi::mcp::McpServer::tool_definitions();
+    for name in ["remindi_list", "remindi_history"] {
+        let schema = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.output_schema.as_ref())
+            .unwrap_or_else(|| panic!("missing {name} output schema"));
+        let encoded = serde_json::to_string(schema).expect("schema serializes");
+        assert!(encoded.contains("\"format\":\"date-time\""), "{name}");
+        assert!(!encoded.contains("\"items\":true"), "{name}");
+    }
+}
+
+#[test]
 fn error_code_retryability_matches_the_specification() {
     use ErrorCode::{
         AdapterDisabled, AdapterError, AdapterNotFound, AdapterTimeout, BackupInvalid,

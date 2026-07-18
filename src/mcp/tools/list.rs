@@ -1,16 +1,17 @@
 //! `remindi_list` handler.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{
     mcp::{
         McpServer,
         schemas::{ListInput, RemindiState, TriggerType},
+        views::RemindiView,
     },
     remindi::ListRequest,
 };
 
-use super::{HandlerError, parse, request_id, safe_item, structured};
+use super::{HandlerError, PageData, parse, request_id, structured};
 
 pub(crate) async fn handle(
     server: &McpServer,
@@ -58,11 +59,14 @@ pub(crate) async fn handle(
     let items = page
         .items
         .into_iter()
-        .map(|item| serde_json::to_value(item).map(safe_item))
+        .map(RemindiView::try_from)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| HandlerError::Serialization)?;
     structured(
         &request_id(actor),
-        json!({"items": items, "next_cursor": page.next_cursor}),
+        PageData {
+            items,
+            next_cursor: page.next_cursor,
+        },
     )
 }

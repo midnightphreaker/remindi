@@ -4,6 +4,7 @@ pub mod responses;
 pub mod schemas;
 pub mod server;
 pub mod tools;
+mod views;
 
 use std::sync::Arc;
 

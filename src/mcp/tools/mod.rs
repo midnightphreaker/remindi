@@ -14,6 +14,7 @@ use super::{
         AddInput, CancelInput, CheckInput, CompleteInput, HistoryInput, ListInput, SnoozeInput,
         UpdateInput, input_schema,
     },
+    views::{CompletionEvidenceView, EventView, RemindiView},
 };
 use crate::remindi::{self as domain, RecurrenceSpec, ServiceError, Trigger};
 
@@ -98,7 +99,7 @@ pub(crate) fn definitions() -> Vec<Tool> {
             true,
             false,
         ),
-        tool::<ListInput, ToolOutput<PageData<Value>>>(
+        tool::<ListInput, ToolOutput<PageData<RemindiView>>>(
             "remindi_list",
             "List Remindi items",
             "List items without evaluating triggers or changing state.",
@@ -116,7 +117,7 @@ pub(crate) fn definitions() -> Vec<Tool> {
             true,
             false,
         ),
-        tool::<HistoryInput, ToolOutput<HistoryData<Value, Value>>>(
+        tool::<HistoryInput, ToolOutput<HistoryData<EventView, CompletionEvidenceView>>>(
             "remindi_history",
             "Get Remindi history",
             "Return ordered events and completion evidence for one item.",
@@ -292,13 +293,6 @@ fn error_result(request_id: String, error: HandlerError) -> rmcp::model::CallToo
             })
         });
     rmcp::model::CallToolResult::structured_error(value)
-}
-
-pub(crate) fn safe_item(mut value: Value) -> Value {
-    if let Some(object) = value.as_object_mut() {
-        object.remove("owner_id");
-    }
-    value
 }
 
 pub(crate) async fn execute(

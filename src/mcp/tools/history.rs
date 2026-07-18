@@ -1,16 +1,17 @@
 //! `remindi_history` handler.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{
     mcp::{
         McpServer,
         schemas::{EventType, HistoryInput},
+        views::{CompletionEvidenceView, EventView},
     },
     remindi::HistoryRequest,
 };
 
-use super::{HandlerError, parse, request_id, structured};
+use super::{HandlerError, HistoryData, parse, request_id, structured};
 
 pub(crate) async fn handle(
     server: &McpServer,
@@ -49,12 +50,25 @@ pub(crate) async fn handle(
         cursor: input.cursor,
     };
     let page = server.service().history(actor, request).await?;
+    let events = page
+        .items
+        .into_iter()
+        .map(EventView::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| HandlerError::Serialization)?;
+    let completion_evidence = page
+        .evidence
+        .map(CompletionEvidenceView::try_from)
+        .transpose()
+        .map_err(|_| HandlerError::Serialization)?
+        .into_iter()
+        .collect();
     structured(
         &request_id(actor),
-        json!({
-            "events": page.items,
-            "completion_evidence": page.evidence.into_iter().collect::<Vec<_>>(),
-            "next_cursor": page.next_cursor
-        }),
+        HistoryData {
+            events,
+            completion_evidence,
+            next_cursor: page.next_cursor,
+        },
     )
 }

@@ -19,6 +19,7 @@ use super::{
     ActorType, CompletionEvidence, DomainError, EventType, EvidenceInput, HistoryPage,
     LifecycleEvent, LinkType, OccurrenceDisposition, Page, Priority, Readiness, RecurrenceSpec,
     Remindi, RemindiEvent, RemindiLink, RemindiState, Trigger, ValidatedEvidence,
+    canonical_timestamp,
     repository::{HistoryFilter, ListFilter, NewIdempotency, RemindiRepository, RepositoryError},
 };
 
@@ -452,11 +453,16 @@ impl RemindiService {
                 let prior = item.next_fire_at;
                 item.snooze(request.snooze_until, &request.reason, now)
                     .map_err(map_domain)?;
+                let prior = prior
+                    .map(canonical_timestamp)
+                    .transpose()
+                    .map_err(map_domain)?;
+                let snooze_until = canonical_timestamp(request.snooze_until).map_err(map_domain)?;
                 Ok((
                     EventType::Snoozed,
                     json!({
                         "prior_next_fire_at": prior,
-                        "snooze_until": request.snooze_until,
+                        "snooze_until": snooze_until,
                         "reason": request.reason,
                     }),
                     None,
@@ -563,7 +569,7 @@ impl RemindiService {
                     return Err(ServiceError::InvalidState);
                 }
                 let prior_version = item.version;
-                let prior_trigger = trigger_summary(item);
+                let prior_trigger = trigger_summary(item)?;
                 let prior_occurrence_no = item.occurrence_no;
                 let prior_schedule = item.next_fire_at;
                 let mut changed_fields = Vec::new();
@@ -631,12 +637,21 @@ impl RemindiService {
                     changed_fields.push("links");
                 }
                 let details = if request.occurrence_disposition.is_some() {
+                    let prior_schedule = prior_schedule
+                        .map(canonical_timestamp)
+                        .transpose()
+                        .map_err(map_domain)?;
+                    let next_schedule = item
+                        .next_fire_at
+                        .map(canonical_timestamp)
+                        .transpose()
+                        .map_err(map_domain)?;
                     json!({
                         "reason": request.reason,
                         "previous_occurrence_no": prior_occurrence_no,
                         "next_occurrence_no": item.occurrence_no,
                         "previous_schedule": prior_schedule,
-                        "next_schedule": item.next_fire_at,
+                        "next_schedule": next_schedule,
                         "skipped_count": skipped_count.unwrap_or(0),
                     })
                 } else {
@@ -644,7 +659,7 @@ impl RemindiService {
                         "reason": request.reason,
                         "changed_fields": changed_fields,
                         "before_trigger": prior_trigger,
-                        "after_trigger": trigger_summary(item),
+                        "after_trigger": trigger_summary(item)?,
                     })
                 };
                 Ok((
@@ -1407,12 +1422,22 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
     }
 }
 
-fn trigger_summary(item: &Remindi) -> Value {
-    json!({
+fn trigger_summary(item: &Remindi) -> Result<Value, ServiceError> {
+    let next_fire_at = item
+        .next_fire_at
+        .map(canonical_timestamp)
+        .transpose()
+        .map_err(map_domain)?;
+    let next_evaluation_at = item
+        .next_evaluation_at
+        .map(canonical_timestamp)
+        .transpose()
+        .map_err(map_domain)?;
+    Ok(json!({
         "type": trigger_type(&item.trigger),
-        "next_fire_at": item.next_fire_at,
-        "next_evaluation_at": item.next_evaluation_at,
-    })
+        "next_fire_at": next_fire_at,
+        "next_evaluation_at": next_evaluation_at,
+    }))
 }
 
 fn validate_actor(actor: &Actor) -> Result<(), ServiceError> {

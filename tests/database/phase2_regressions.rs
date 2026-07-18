@@ -237,6 +237,60 @@ async fn occurrence_disposition_is_rejected_until_item_is_due_or_overdue() {
 }
 
 #[tokio::test]
+async fn occurrence_advance_event_persists_canonical_schedule_timestamps() {
+    let (_database, service, _clock) = setup().await;
+    let mut request = add_request(
+        "canonical-occurrence-create",
+        Trigger::Interval {
+            first_at: datetime!(2026-07-19 05:00 UTC),
+            every_seconds: 3600,
+        },
+    );
+    request.recurrence = Some(RecurrenceSpec {
+        every_seconds: 3600,
+        missed_policy: MissedPolicy::CatchUp,
+        max_occurrences: None,
+        end_at: None,
+    });
+    let created = service.add(&actor(), request).await.expect("add");
+    let ready = service
+        .check(&actor(), check_request(50))
+        .await
+        .expect("ready");
+    let version = ready.items[0].remindi.version;
+    let mut update = update_request(created.remindi.id, version, "canonical-occurrence-advance");
+    update.occurrence_disposition = Some(OccurrenceDisposition::Acknowledged);
+    service.update(&actor(), update).await.expect("advance");
+    let history = service
+        .history(
+            &actor(),
+            HistoryRequest {
+                remindi_id: created.remindi.id,
+                after_sequence: None,
+                event_types: vec![],
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("history");
+    let advanced = history
+        .items
+        .iter()
+        .find(|event| event.event_type == remindi::remindi::EventType::OccurrenceAdvanced)
+        .expect("occurrence event");
+
+    assert_eq!(
+        advanced.details["previous_schedule"],
+        "2026-07-19T05:00:00.000Z"
+    );
+    assert_eq!(
+        advanced.details["next_schedule"],
+        "2026-07-19T06:00:00.000Z"
+    );
+}
+
+#[tokio::test]
 async fn trigger_replacement_validates_the_final_recurrence_pair() {
     let (_database, service, _clock) = setup().await;
     let mut request = add_request(
@@ -354,6 +408,16 @@ async fn overdue_snooze_expiry_increments_version_once_and_appends_one_transitio
         history.items.last().expect("last event").new_version,
         Some(5)
     );
+    let snoozed = history
+        .items
+        .iter()
+        .find(|event| event.event_type == remindi::remindi::EventType::Snoozed)
+        .expect("snooze event");
+    assert_eq!(
+        snoozed.details["prior_next_fire_at"],
+        "2026-07-19T05:00:00.000Z"
+    );
+    assert_eq!(snoozed.details["snooze_until"], "2026-07-19T07:00:00.000Z");
 }
 
 #[tokio::test]
@@ -490,6 +554,14 @@ async fn update_event_records_changed_fields() {
         .expect("changed fields");
 
     assert!(changed.iter().any(|field| field == "message"));
+    assert_eq!(
+        updated.details["before_trigger"]["next_fire_at"],
+        "2026-07-20T06:00:00.000Z"
+    );
+    assert_eq!(
+        updated.details["after_trigger"]["next_fire_at"],
+        "2026-07-20T06:00:00.000Z"
+    );
 }
 
 #[tokio::test]
