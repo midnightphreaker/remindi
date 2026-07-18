@@ -9,4 +9,5 @@ pub mod error;
 pub mod http;
 pub mod mcp;
 pub mod remindi;
+pub mod scheduler;
 pub mod triggers;

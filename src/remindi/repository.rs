@@ -394,6 +394,77 @@ impl RemindiRepository {
             .collect()
     }
 
+    pub(crate) async fn scheduler_candidates(
+        connection: &mut SqliteConnection,
+        owner_id: &str,
+        now: OffsetDateTime,
+        limit: usize,
+    ) -> Result<Vec<Remindi>, RepositoryError> {
+        let now = timestamp(now)?;
+        let limit = i64::try_from(limit).map_err(|_| RepositoryError::InvalidData)?;
+        sqlx::query(
+            "SELECT r.* FROM remindi r
+             WHERE r.owner_id = ?
+               AND (
+                 (r.state = 'snoozed' AND julianday(r.snooze_until) <= julianday(?))
+                 OR (
+                   r.state = 'due'
+                   AND r.due_since IS NOT NULL
+                   AND julianday(r.due_since) + (r.overdue_after_seconds / 86400.0)
+                       <= julianday(?)
+                 )
+                 OR (
+                   r.state = 'scheduled'
+                   AND (
+                     (
+                       r.trigger_type IN ('at_time', 'after_elapsed', 'interval')
+                       AND julianday(r.next_fire_at) <= julianday(?)
+                     )
+                     OR (
+                       r.trigger_type = 'condition'
+                       AND (
+                         julianday(r.next_evaluation_at) <= julianday(?)
+                         OR julianday(json_extract(r.trigger_spec_json, '$.manual_check_at'))
+                            <= julianday(?)
+                       )
+                     )
+                   )
+                 )
+               )
+             ORDER BY
+               CASE
+                 WHEN r.state = 'snoozed' THEN r.snooze_until
+                 WHEN r.state = 'due' THEN r.due_since
+                 WHEN r.trigger_type = 'condition' THEN
+                   CASE
+                     WHEN r.next_evaluation_at IS NULL THEN
+                       json_extract(r.trigger_spec_json, '$.manual_check_at')
+                     WHEN json_extract(r.trigger_spec_json, '$.manual_check_at') IS NULL THEN
+                       r.next_evaluation_at
+                     WHEN julianday(r.next_evaluation_at)
+                          <= julianday(json_extract(r.trigger_spec_json, '$.manual_check_at'))
+                       THEN r.next_evaluation_at
+                     ELSE json_extract(r.trigger_spec_json, '$.manual_check_at')
+                   END
+                 ELSE r.next_fire_at
+               END ASC,
+               r.id ASC
+             LIMIT ?",
+        )
+        .bind(owner_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(limit)
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(remindi_from_row)
+        .collect()
+    }
+
     pub(crate) async fn history(
         connection: &mut SqliteConnection,
         filter: HistoryFilter<'_>,

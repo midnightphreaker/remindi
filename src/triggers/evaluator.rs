@@ -108,6 +108,7 @@ fn trigger_satisfaction(
         ),
         Trigger::Condition {
             parameters,
+            poll_interval_seconds,
             manual_check_at,
             ..
         } => {
@@ -124,6 +125,18 @@ fn trigger_satisfaction(
             let evaluated = condition != ConditionEvaluation::NotEvaluated;
             let manual = condition != ConditionEvaluation::Satisfied
                 && manual_check_at.is_some_and(|deadline| now >= deadline);
+            if evaluated {
+                remindi.next_evaluation_at =
+                    if condition == ConditionEvaluation::Satisfied || manual {
+                        None
+                    } else {
+                        let seconds =
+                            i64::try_from(poll_interval_seconds.unwrap_or(30)).unwrap_or(86_400);
+                        Some(now + Duration::seconds(seconds))
+                    };
+            } else if manual {
+                remindi.next_evaluation_at = None;
+            }
             (
                 condition == ConditionEvaluation::Satisfied || manual,
                 if manual {

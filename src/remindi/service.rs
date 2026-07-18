@@ -813,7 +813,17 @@ impl RemindiService {
         };
         let mut items = Vec::with_capacity(ready.len());
         for (candidate, _) in ready {
-            if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await? {
+            if let Some(item) = self
+                .evaluate_one(
+                    actor,
+                    candidate,
+                    now,
+                    &context,
+                    ConditionEvaluation::NotEvaluated,
+                    None,
+                )
+                .await?
+            {
                 items.push(item);
             }
         }
@@ -824,21 +834,50 @@ impl RemindiService {
         })
     }
 
+    pub(crate) async fn scheduler_candidates(
+        &self,
+        now: OffsetDateTime,
+        limit: usize,
+    ) -> Result<Vec<Remindi>, ServiceError> {
+        let mut connection = self.database.connection().await.map_err(map_database)?;
+        RemindiRepository::scheduler_candidates(connection.as_mut(), &self.owner_id, now, limit)
+            .await
+            .map_err(map_repository)
+    }
+
+    pub(crate) async fn apply_scheduler_evaluation(
+        &self,
+        actor: &Actor,
+        candidate: Remindi,
+        now: OffsetDateTime,
+        condition: ConditionEvaluation,
+        condition_detail: Option<String>,
+    ) -> Result<(), ServiceError> {
+        let context = CheckContext {
+            session_id: None,
+            task_lineage_id: None,
+            lifecycle_event: LifecycleEvent::Checkpoint,
+            active_goal_ids: vec![],
+        };
+        self.evaluate_one(actor, candidate, now, &context, condition, condition_detail)
+            .await
+            .map(|_| ())
+    }
+
     async fn evaluate_one(
         &self,
         actor: &Actor,
         mut candidate: Remindi,
         now: OffsetDateTime,
         context: &CheckContext,
+        condition: ConditionEvaluation,
+        condition_detail: Option<String>,
     ) -> Result<Option<CheckedItem>, ServiceError> {
         let prior = candidate.clone();
-        let result = evaluate(
-            &mut candidate,
-            now,
-            context,
-            ConditionEvaluation::NotEvaluated,
-        )
-        .map_err(map_domain)?;
+        let result = evaluate(&mut candidate, now, context, condition).map_err(map_domain)?;
+        if condition != ConditionEvaluation::NotEvaluated {
+            candidate.last_condition_detail = condition_detail.clone();
+        }
         if result.events.is_empty() {
             return Ok(result.readiness.map(|readiness| CheckedItem {
                 remindi: prior,
@@ -878,7 +917,11 @@ impl RemindiService {
                     event_type,
                     prior_version: Some(prior.version),
                     new_version: Some(candidate.version),
-                    details: json!({"lifecycle_event": context.lifecycle_event}),
+                    details: json!({
+                        "lifecycle_event": context.lifecycle_event,
+                        "condition": candidate.last_condition_status,
+                        "condition_detail": condition_detail,
+                    }),
                 },
             )
             .await?;
