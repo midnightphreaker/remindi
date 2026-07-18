@@ -18,7 +18,7 @@ pub async fn live() -> Json<impl Serialize> {
     Json(HealthBody { status: "ok" })
 }
 
-/// Reports whether implemented startup checks have completed.
+/// Reports process readiness independently of optional workload desired state.
 pub async fn ready(State(state): State<AppState>) -> Response {
     if state.is_ready() {
         (StatusCode::OK, Json(HealthBody { status: "ready" })).into_response()

@@ -6,4 +6,5 @@ mod runner;
 pub use lease::{LeaseError, LeaseGuard, SchedulerLease};
 pub use runner::{
     AdapterProvider, PollReport, RunExit, Scheduler, SchedulerConfig, SchedulerError,
+    SchedulerWorkload,
 };

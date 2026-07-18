@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use remindi::{
+    admin::workloads::WorkloadController,
     app::{AppState, run, shutdown_signal},
     auth::web_session::{WebMode, WebSessionManager},
     clock::{SystemClock, UuidV7Generator},
@@ -10,13 +11,12 @@ use remindi::{
     http::{api::WebApiState, middleware::init_json_tracing, router::build_router},
     mcp::server::McpWorkload,
     remindi::RemindiService,
-    scheduler::{AdapterProvider, Scheduler, SchedulerConfig},
+    scheduler::{AdapterProvider, Scheduler, SchedulerConfig, SchedulerWorkload},
     triggers::adapters::AdapterRegistry,
     webui::{AssetOverrides, WebUiAssets},
 };
 use secrecy::ExposeSecret;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,13 +95,21 @@ async fn main() -> anyhow::Result<()> {
         )
         .context("scheduler workload startup failed")?,
     );
-    let scheduler_cancel = CancellationToken::new();
-    let scheduler_task = tokio::spawn({
-        let scheduler = Arc::clone(&scheduler);
-        let cancel = scheduler_cancel.clone();
-        async move { scheduler.run(cancel).await }
-    });
-    let mut state = state.with_mcp(Arc::clone(&mcp)).with_web_api(web_api);
+    let scheduler_workload = Arc::new(SchedulerWorkload::new(scheduler));
+    let workloads = Arc::new(
+        WorkloadController::new(
+            Arc::clone(&database),
+            state.clock_shared(),
+            Arc::clone(&mcp),
+            Arc::clone(&scheduler_workload),
+        )
+        .await
+        .context("workload controller startup failed")?,
+    );
+    let mut state = state
+        .with_mcp(Arc::clone(&mcp))
+        .with_web_api(web_api)
+        .with_workloads(Arc::clone(&workloads));
     if let Some(assets) = webui_assets {
         state = state.with_webui_assets(assets);
     }
@@ -115,15 +123,14 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("control plane failed");
     state.set_ready(false);
-    mcp.stop().context("MCP workload shutdown failed")?;
-    scheduler_cancel.cancel();
-    scheduler_task
+    workloads
+        .shutdown()
         .await
-        .context("scheduler workload task failed")?
-        .context("scheduler workload shutdown failed")?;
+        .context("workload shutdown failed")?;
     drop(state);
+    drop(workloads);
     drop(mcp);
-    drop(scheduler);
+    drop(scheduler_workload);
     Arc::try_unwrap(database)
         .map_err(|_| anyhow::anyhow!("database still has active application references"))?
         .close()

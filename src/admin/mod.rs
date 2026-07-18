@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod audit;
 pub mod settings;
+pub mod workloads;
 
 use std::sync::Arc;
 

@@ -1,9 +1,16 @@
-use std::{sync::Arc, time::Duration as StdDuration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration as StdDuration,
+};
 
 use futures::{StreamExt, stream};
 use thiserror::Error;
 use time::Duration;
 use tokio::time::Instant;
+use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -84,6 +91,8 @@ pub enum SchedulerError {
     Service(#[from] ServiceError),
     #[error("scheduler desired state is invalid")]
     InvalidDesiredState,
+    #[error("scheduler workload task failed")]
+    TaskJoin,
 }
 
 /// Single-process scheduler workload. Application wiring should spawn `run`.
@@ -148,7 +157,15 @@ impl Scheduler {
         if !self.desired_running().await? {
             return Ok(RunExit::DesiredStopped);
         }
-        let mut guard = self.lease.acquire(self.clock.now()).await?;
+        let guard = self.lease.acquire(self.clock.now()).await?;
+        self.run_acquired(cancel, guard).await
+    }
+
+    async fn run_acquired(
+        &self,
+        cancel: CancellationToken,
+        mut guard: LeaseGuard,
+    ) -> Result<RunExit, SchedulerError> {
         let exit = loop {
             if cancel.is_cancelled() {
                 break RunExit::Cancelled;
@@ -252,6 +269,88 @@ impl Scheduler {
     /// Releases a lease acquired through this scheduler.
     pub async fn release(&self, guard: &LeaseGuard) -> Result<(), SchedulerError> {
         self.lease.release(guard).await.map_err(Into::into)
+    }
+}
+
+struct RunningScheduler {
+    cancellation: CancellationToken,
+    task: JoinHandle<Result<RunExit, SchedulerError>>,
+}
+
+/// Owns the one cancellable scheduler task used by the workload controller.
+pub struct SchedulerWorkload {
+    scheduler: Arc<Scheduler>,
+    task: Mutex<Option<RunningScheduler>>,
+    running: Arc<AtomicBool>,
+}
+
+impl SchedulerWorkload {
+    /// Creates a stopped scheduler workload around an initialized scheduler.
+    #[must_use]
+    pub fn new(scheduler: Arc<Scheduler>) -> Self {
+        Self {
+            scheduler,
+            task: Mutex::new(None),
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Reports whether the managed scheduler task is active.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
+    /// Acquires the scheduler lease before spawning the polling task.
+    pub async fn start(&self) -> Result<(), SchedulerError> {
+        let mut task = self.task.lock().await;
+        if task.as_ref().is_some_and(|task| !task.task.is_finished()) {
+            return Ok(());
+        }
+        if let Some(finished) = task.take() {
+            finished
+                .task
+                .await
+                .map_err(|_| SchedulerError::TaskJoin)??;
+        }
+        if !self.scheduler.desired_running().await? {
+            return Err(SchedulerError::InvalidDesiredState);
+        }
+        let guard = self.scheduler.acquire().await?;
+        let cancellation = CancellationToken::new();
+        let run_cancel = cancellation.child_token();
+        let scheduler = Arc::clone(&self.scheduler);
+        let running = Arc::clone(&self.running);
+        running.store(true, Ordering::Release);
+        let run = tokio::spawn(async move {
+            let result = scheduler.run_acquired(run_cancel, guard).await;
+            running.store(false, Ordering::Release);
+            result
+        });
+        *task = Some(RunningScheduler {
+            cancellation,
+            task: run,
+        });
+        Ok(())
+    }
+
+    /// Cancels the polling task, waits for adapter cancellation, and releases its lease.
+    pub async fn stop(&self) -> Result<(), SchedulerError> {
+        let running = self.task.lock().await.take();
+        let Some(running) = running else {
+            self.running.store(false, Ordering::Release);
+            return Ok(());
+        };
+        running.cancellation.cancel();
+        let result = running.task.await.map_err(|_| SchedulerError::TaskJoin)?;
+        self.running.store(false, Ordering::Release);
+        result.map(|_| ())
+    }
+
+    /// Gracefully replaces the scheduler task and lease.
+    pub async fn restart(&self) -> Result<(), SchedulerError> {
+        self.stop().await?;
+        self.start().await
     }
 }
 

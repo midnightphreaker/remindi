@@ -10,6 +10,7 @@ use axum::Router;
 use tokio::net::TcpListener;
 
 use crate::{
+    admin::workloads::WorkloadController,
     clock::{Clock, IdGenerator},
     config::BootstrapConfig,
     db::DatabaseManager,
@@ -28,6 +29,7 @@ pub struct AppState {
     mcp: Option<Arc<McpWorkload>>,
     web_api: Option<WebApiState>,
     webui_assets: Option<Arc<WebUiAssets>>,
+    workloads: Option<Arc<WorkloadController>>,
     ready: Arc<AtomicBool>,
 }
 
@@ -47,6 +49,7 @@ impl AppState {
             mcp: None,
             web_api: None,
             webui_assets: None,
+            workloads: None,
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -76,6 +79,13 @@ impl AppState {
     #[must_use]
     pub fn with_webui_assets(mut self, assets: Arc<WebUiAssets>) -> Self {
         self.webui_assets = Some(assets);
+        self
+    }
+
+    /// Attaches the process-owned workload controller to the control plane.
+    #[must_use]
+    pub fn with_workloads(mut self, workloads: Arc<WorkloadController>) -> Self {
+        self.workloads = Some(workloads);
         self
     }
 
@@ -137,6 +147,12 @@ impl AppState {
     #[must_use]
     pub fn webui_assets(&self) -> Option<Arc<WebUiAssets>> {
         self.webui_assets.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the workload controller used by authenticated administration routes.
+    #[must_use]
+    pub fn workloads_shared(&self) -> Option<Arc<WorkloadController>> {
+        self.workloads.as_ref().map(Arc::clone)
     }
 
     /// Reports whether all currently implemented readiness checks pass.
