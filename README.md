@@ -467,8 +467,20 @@ this,” not “the work is finished.”
 
 ### Timestamps, versions, and idempotency
 
-- Timestamps require RFC 3339 with `Z` or an explicit UTC offset and are
-  normalized to UTC milliseconds.
+- Timestamp inputs require RFC 3339 with `Z` or an explicit UTC offset.
+- Every server-owned timestamp returned by `remindi_check`, `remindi_list`, or
+  `remindi_history` is one UTC JSON string with exactly three fractional digits
+  and a `Z` suffix: `YYYY-MM-DDTHH:MM:SS.sssZ`.
+- This applies to item scheduling and lifecycle timestamps, nested trigger and
+  recurrence timestamps, history `occurred_at`, completion-evidence
+  `observed_at` and `recorded_at`, and timestamp values in server-owned event
+  details.
+- Older event-detail rows that stored Rust `OffsetDateTime` component arrays
+  are normalized when read through MCP. Remindi does not rewrite those
+  database rows and no migration is required.
+- Caller-owned JSON remains opaque. In particular, Remindi does not reinterpret
+  timestamp-looking values inside condition `parameters` or evidence
+  `metadata`.
 - Existing-item mutations require `expected_version >= 1`.
 - A stale version returns `VERSION_CONFLICT` and the current version. Re-read
   before deciding.

@@ -221,11 +221,40 @@ async fn lifecycle_tools_share_service_state_and_read_tools_do_not_mutate_it() {
     let listed = call_ok(&server, "remindi_list", json!({"project_id": "project-a"})).await;
     assert_eq!(listed["data"]["items"][0]["id"], id);
     assert!(listed["data"]["items"][0].get("owner_id").is_none());
+    assert_eq!(
+        listed["data"]["items"][0]["created_at"],
+        "2026-07-19T06:00:00.000Z"
+    );
+    assert_eq!(
+        listed["data"]["items"][0]["snooze_until"],
+        "2026-07-19T07:00:00.000Z"
+    );
+    assert_eq!(
+        listed["data"]["items"][0]["trigger"]["at"],
+        "2026-07-19T05:00:00.000Z"
+    );
     let history = call_ok(&server, "remindi_history", json!({"remindi_id": id})).await;
     assert!(
         history["data"]["events"]
             .as_array()
             .is_some_and(|events| events.len() >= 4)
+    );
+    assert!(
+        history["data"]["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .all(|event| event["occurred_at"] == "2026-07-19T06:00:00.000Z")
+    );
+    let snooze_event = history["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|event| event["event_type"] == "snoozed")
+        .expect("snooze event");
+    assert_eq!(
+        snooze_event["details"]["snooze_until"],
+        "2026-07-19T07:00:00.000Z"
     );
 
     let cancelled = call_ok(
@@ -274,13 +303,27 @@ async fn complete_accepts_authenticated_structured_evidence() {
                 "type": "test_result",
                 "summary": "Targeted test passed",
                 "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "observed_at": "2026-07-19T06:00:00Z"
+                "observed_at": "2026-07-19T06:00:00Z",
+                "metadata": {"next_fire_at": [2026, 200, 6, 0, 0, 0, 0, 0, 0]}
             },
             "idempotency_key": "complete-item"
         }),
     )
     .await;
     assert_eq!(completed["data"]["remindi"]["state"], "completed");
+    let history = call_ok(&server, "remindi_history", json!({"remindi_id": id})).await;
+    assert_eq!(
+        history["data"]["completion_evidence"][0]["observed_at"],
+        "2026-07-19T06:00:00.000Z"
+    );
+    assert_eq!(
+        history["data"]["completion_evidence"][0]["recorded_at"],
+        "2026-07-19T06:00:00.000Z"
+    );
+    assert_eq!(
+        history["data"]["completion_evidence"][0]["metadata"],
+        json!({"next_fire_at": [2026, 200, 6, 0, 0, 0, 0, 0, 0]})
+    );
 
     drop(server);
     Arc::try_unwrap(database)

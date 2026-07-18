@@ -154,10 +154,23 @@ async fn real_streamable_http_initializes_discovers_and_calls_exact_tools() {
         .call_tool(CallToolRequestParams::new("remindi_list"))
         .await
         .expect("list call");
+    let listed_structured = listed.structured_content.as_ref().expect("structured");
     assert_eq!(
-        listed.structured_content.as_ref().expect("structured")["data"]["items"][0]["source_session_id"],
+        listed_structured["data"]["items"][0]["source_session_id"],
         "logical-session-a"
     );
+    assert_eq!(
+        listed_structured["data"]["items"][0]["created_at"],
+        "2026-07-19T06:00:00.000Z"
+    );
+    let listed_text: serde_json::Value = serde_json::from_str(
+        &listed.content[0]
+            .as_text()
+            .expect("list text fallback")
+            .text,
+    )
+    .expect("list fallback JSON");
+    assert_eq!(&listed_text, listed_structured);
 
     client.cancel().await.expect("client disconnects");
     fixture.stop().await;
