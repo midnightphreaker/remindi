@@ -3,10 +3,11 @@ use std::sync::Arc;
 use anyhow::Context;
 use remindi::{
     app::{AppState, run, shutdown_signal},
+    auth::web_session::{WebMode, WebSessionManager},
     clock::{SystemClock, UuidV7Generator},
     config::BootstrapConfig,
     db::DatabaseManager,
-    http::{middleware::init_json_tracing, router::build_router},
+    http::{api::WebApiState, middleware::init_json_tracing, router::build_router},
     mcp::server::McpWorkload,
     remindi::RemindiService,
     scheduler::{AdapterProvider, Scheduler, SchedulerConfig},
@@ -33,6 +34,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .with_database(Arc::clone(&database));
     let mcp = Arc::new(McpWorkload::new(&state).context("MCP workload startup failed")?);
+    let web_sessions = WebSessionManager::from_config(state.bootstrap())
+        .map_err(|_| anyhow::anyhow!("WebUI session startup failed"))?;
+    if web_sessions.mode() == WebMode::Unauthenticated {
+        tracing::warn!(event = "webui_authentication_disabled");
+    }
+    let web_service = Arc::new(RemindiService::new(
+        Arc::clone(&database),
+        state.bootstrap().owner_id(),
+        state.bootstrap().mcp_token().expose_secret().as_bytes(),
+        state.clock_shared(),
+        state.ids_shared(),
+    ));
+    let web_api = WebApiState::new(web_sessions, web_service);
     let scheduler_service = Arc::new(RemindiService::new(
         Arc::clone(&database),
         state.bootstrap().owner_id(),
@@ -65,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         let cancel = scheduler_cancel.clone();
         async move { scheduler.run(cancel).await }
     });
-    let state = state.with_mcp(Arc::clone(&mcp));
+    let state = state.with_mcp(Arc::clone(&mcp)).with_web_api(web_api);
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind the fixed listener at {address}"))?;

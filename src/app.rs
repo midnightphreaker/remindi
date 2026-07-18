@@ -13,6 +13,7 @@ use crate::{
     clock::{Clock, IdGenerator},
     config::BootstrapConfig,
     db::DatabaseManager,
+    http::api::WebApiState,
     mcp::server::McpWorkload,
 };
 
@@ -24,6 +25,7 @@ pub struct AppState {
     ids: Arc<dyn IdGenerator>,
     database: Option<Arc<DatabaseManager>>,
     mcp: Option<Arc<McpWorkload>>,
+    web_api: Option<WebApiState>,
     ready: Arc<AtomicBool>,
 }
 
@@ -41,6 +43,7 @@ impl AppState {
             ids,
             database: None,
             mcp: None,
+            web_api: None,
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -56,6 +59,13 @@ impl AppState {
     #[must_use]
     pub fn with_mcp(mut self, mcp: Arc<McpWorkload>) -> Self {
         self.mcp = Some(mcp);
+        self
+    }
+
+    /// Attaches the browser JSON API to the control plane.
+    #[must_use]
+    pub fn with_web_api(mut self, web_api: WebApiState) -> Self {
+        self.web_api = Some(web_api);
         self
     }
 
@@ -105,6 +115,12 @@ impl AppState {
     #[must_use]
     pub fn mcp_shared(&self) -> Option<Arc<McpWorkload>> {
         self.mcp.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the browser JSON API state when configured.
+    #[must_use]
+    pub fn web_api(&self) -> Option<&WebApiState> {
+        self.web_api.as_ref()
     }
 
     /// Reports whether all currently implemented readiness checks pass.
