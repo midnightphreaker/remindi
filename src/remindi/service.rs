@@ -683,6 +683,16 @@ impl RemindiService {
         Ok(Page { items, next_cursor })
     }
 
+    /// Reads one owner-scoped item without evaluating its trigger.
+    pub async fn get(&self, actor: &Actor, id: Uuid) -> Result<Remindi, ServiceError> {
+        validate_actor(actor)?;
+        let mut connection = self.database.connection().await.map_err(map_database)?;
+        RemindiRepository::find(connection.as_mut(), &self.owner_id, id)
+            .await
+            .map_err(map_repository)?
+            .ok_or(ServiceError::NotFound)
+    }
+
     pub async fn history(
         &self,
         actor: &Actor,

@@ -426,25 +426,9 @@ async fn detail(
         Ok(actor) => actor,
         Err(response) => return *response,
     };
-    let mut cursor = None;
-    loop {
-        let request = ListRequest {
-            limit: 200,
-            cursor,
-            ..ListRequest::default()
-        };
-        match state.service().list(&actor, request).await {
-            Ok(page) => {
-                if let Some(item) = page.items.into_iter().find(|item| item.id == id) {
-                    return success(&headers, item);
-                }
-                match page.next_cursor {
-                    Some(next) => cursor = Some(next),
-                    None => return service_error(&headers, domain::ServiceError::NotFound),
-                }
-            }
-            Err(error) => return service_error(&headers, error),
-        }
+    match state.service().get(&actor, id).await {
+        Ok(item) => success(&headers, item),
+        Err(error) => service_error(&headers, error),
     }
 }
 
