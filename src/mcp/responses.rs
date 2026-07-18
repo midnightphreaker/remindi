@@ -52,6 +52,23 @@ pub struct ToolError {
     pub details: Option<Value>,
 }
 
+/// Common MCP output schema. Runtime results contain exactly one of `data` or `error`.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[schemars(extend(
+    "oneOf" = [
+        {"properties": {"ok": {"const": true}}, "required": ["ok", "request_id", "data"]},
+        {"properties": {"ok": {"const": false}}, "required": ["ok", "request_id", "error"]}
+    ]
+))]
+pub struct ToolOutput<T> {
+    pub ok: bool,
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
+}
+
 impl ToolError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {

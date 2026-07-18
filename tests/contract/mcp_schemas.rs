@@ -1,9 +1,5 @@
-#[allow(dead_code)]
-#[path = "../../src/mcp/mod.rs"]
-mod mcp;
-
-use mcp::responses::{ErrorCode, ErrorResponse, SuccessResponse, ToolError};
-use mcp::schemas::{
+use remindi::mcp::responses::{ErrorCode, ErrorResponse, SuccessResponse, ToolError};
+use remindi::mcp::schemas::{
     AddInput, CancelInput, CheckInput, CompleteInput, HistoryInput, ListInput, SnoozeInput,
     TOOL_NAMES, UpdateInput, input_schema,
 };
