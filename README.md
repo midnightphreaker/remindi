@@ -213,8 +213,9 @@ same MCP token, and verify that the client discovers exactly eight tools.
 ## Connect an MCP client
 
 Remindi exposes a Streamable HTTP endpoint protected by a fixed bearer token;
-it does not use OAuth. The examples use the hosted endpoint. A client using the
-default local Compose deployment should replace the URL with
+it does not use OAuth. The examples use the reserved documentation hostname
+`mcp.example.com`; replace it with your deployment's hostname. A client using
+the default local Compose deployment should use
 `http://127.0.0.1:8000/mcp`.
 
 Export the raw token before launching the client:
@@ -232,7 +233,7 @@ Preferred CLI setup:
 
 ```sh
 codex mcp add remindi \
-  --url https://mcp.phrk.org/remindi \
+  --url https://mcp.example.com/remindi \
   --bearer-token-env-var REMINDI_MCP_TOKEN
 codex mcp get remindi --json
 ```
@@ -242,7 +243,7 @@ project:
 
 ```toml
 [mcp_servers.remindi]
-url = "https://mcp.phrk.org/remindi"
+url = "https://mcp.example.com/remindi"
 bearer_token_env_var = "REMINDI_MCP_TOKEN"
 ```
 
@@ -261,7 +262,7 @@ For a project-scoped server, add `.mcp.json` at the project root:
   "mcpServers": {
     "remindi": {
       "type": "http",
-      "url": "https://mcp.phrk.org/remindi",
+      "url": "https://mcp.example.com/remindi",
       "headers": {
         "Authorization": "Bearer ${REMINDI_MCP_TOKEN}"
       }
@@ -288,7 +289,7 @@ Add the `mcp` member to project-root `opencode.json`, or to global
   "mcp": {
     "remindi": {
       "type": "remote",
-      "url": "https://mcp.phrk.org/remindi",
+      "url": "https://mcp.example.com/remindi",
       "enabled": true,
       "oauth": false,
       "headers": {
@@ -315,7 +316,7 @@ Add this to global `~/.cursor/mcp.json`, or `.cursor/mcp.json` for one project:
 {
   "mcpServers": {
     "remindi": {
-      "url": "https://mcp.phrk.org/remindi",
+      "url": "https://mcp.example.com/remindi",
       "headers": {
         "Authorization": "Bearer ${env:REMINDI_MCP_TOKEN}"
       }
@@ -1433,8 +1434,8 @@ Set at least:
 
 ```dotenv
 REMINDI_WEBUI_COOKIE_SECURE=true
-REMINDI_HTTP_ALLOWED_HOSTS=mcp.phrk.org
-REMINDI_HTTP_ALLOWED_ORIGINS=https://mcp.phrk.org
+REMINDI_HTTP_ALLOWED_HOSTS=mcp.example.com
+REMINDI_HTTP_ALLOWED_ORIGINS=https://mcp.example.com
 ```
 
 The following Nginx shape preserves the external Host, strips the WebUI
@@ -1442,13 +1443,13 @@ prefix, passes MCP to the internal `/mcp` route, and rewrites the cookie path:
 
 ```nginx
 upstream remindi_backend {
-    server 127.0.0.1:18014;
+    server 127.0.0.1:8000;
     keepalive 8;
 }
 
 server {
     listen 443 ssl;
-    server_name mcp.phrk.org;
+    server_name mcp.example.com;
 
     location = /remindi {
         proxy_http_version 1.1;
@@ -1484,18 +1485,18 @@ prefix when `X-Forwarded-Prefix` is supplied.
 Keep the container port loopback-only when the reverse proxy is on the same
 host. Never send browser or MCP credentials over untrusted plaintext HTTP.
 
-### Reference hosted deployment
+### Example hosted deployment
 
-The owner-operated reference deployment uses:
+A reverse-proxied deployment can use:
 
-- `https://mcp.phrk.org/remindi` for MCP;
-- `https://mcp.phrk.org/remindi-ui/` for the WebUI;
+- `https://mcp.example.com/remindi` for MCP;
+- `https://mcp.example.com/remindi-ui/` for the WebUI;
 - a loopback-only container upstream;
 - a persistent external data volume;
 - the central host Compose and reverse-proxy stack.
 
-There is no public demo token or account. Deploying the repository does not
-grant access to the reference instance.
+These URLs use the reserved `example.com` domain and do not identify a live
+Remindi instance. Replace the hostname with your own deployment's hostname.
 
 ### Updates and rollback
 
