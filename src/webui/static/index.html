@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{TITLE}}</title>
+  <link rel="icon" href="/assets/favicon">
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/custom.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="{{TITLE}} dashboard">
+      <img src="/assets/logo" alt="" width="152" height="40">
+      <span>{{TITLE}}</span>
+    </a>
+    <nav aria-label="Primary">
+      <a href="?view=dashboard" data-nav="dashboard" aria-current="page">Dashboard</a>
+      <a href="?view=items" data-nav="items">Remindi items</a>
+    </nav>
+    <button id="logout-button" class="button quiet" type="button">Sign out</button>
+  </header>
+
+  <main id="main-content" tabindex="-1">
+    <div id="status" class="status" aria-live="polite" aria-atomic="true"></div>
+
+    <section id="dashboard-view" aria-labelledby="dashboard-title">
+      <div class="heading-row">
+        <div>
+          <p class="eyebrow">Owner control plane</p>
+          <h1 id="dashboard-title">What needs your attention</h1>
+        </div>
+        <div class="button-row">
+          <button class="button" type="button" data-action="check">Check now</button>
+          <button class="button primary" type="button" data-action="add">Add Remindi item</button>
+        </div>
+      </div>
+      <div id="summary" class="summary-grid" aria-label="Remindi item summary"></div>
+      <section class="panel" aria-labelledby="attention-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Ready queue</p>
+            <h2 id="attention-title">Due and overdue</h2>
+          </div>
+          <a href="?view=items&amp;state=due,overdue">View all</a>
+        </div>
+        <div id="attention-list"></div>
+      </section>
+    </section>
+
+    <section id="items-view" aria-labelledby="items-title" hidden>
+      <div class="heading-row">
+        <div>
+          <p class="eyebrow">Remindi</p>
+          <h1 id="items-title">Items</h1>
+        </div>
+        <button class="button primary" type="button" data-action="add">Add item</button>
+      </div>
+      <form id="filters" class="panel filter-grid">
+        <div class="field">
+          <label for="filter-query">Search</label>
+          <input id="filter-query" name="q" type="search" placeholder="Title, project, or task">
+        </div>
+        <div class="field">
+          <label for="filter-state">State</label>
+          <select id="filter-state" name="state">
+            <option value="">All states</option>
+            <option>scheduled</option><option>due</option><option>overdue</option>
+            <option>snoozed</option><option>completed</option><option>cancelled</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="filter-project">Project</label>
+          <input id="filter-project" name="project_id" placeholder="Any project">
+        </div>
+        <button class="button" type="submit">Apply filters</button>
+        <button class="button quiet" id="clear-filters" type="button">Clear</button>
+      </form>
+      <div id="item-list" class="panel table-shell" aria-live="polite"></div>
+      <div class="pagination">
+        <button id="previous-page" class="button quiet" type="button" disabled>Previous</button>
+        <button id="next-page" class="button quiet" type="button">Next</button>
+      </div>
+    </section>
+
+    <section id="detail-view" aria-labelledby="detail-title" hidden>
+      <button id="detail-back" class="back-link" type="button">← Back to items</button>
+      <div id="detail-content"></div>
+    </section>
+  </main>
+
+  <dialog id="login-dialog" aria-labelledby="login-title">
+    <form id="login-form" method="dialog" novalidate>
+      <img src="/assets/logo" alt="" class="dialog-logo" width="148" height="40">
+      <p class="eyebrow">Protected WebUI</p>
+      <h1 id="login-title">Sign in to {{TITLE}}</h1>
+      <p class="muted">Use the owner credentials configured for this WebUI.</p>
+      <div id="login-error" class="inline-error" role="alert" hidden></div>
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="button primary full" type="submit">Sign in</button>
+    </form>
+  </dialog>
+
+  <dialog id="operation-dialog" aria-labelledby="operation-title">
+    <form id="operation-form" method="dialog" novalidate>
+      <div class="dialog-heading">
+        <h2 id="operation-title">Action</h2>
+        <button class="icon-button" type="button" data-close aria-label="Close dialog">×</button>
+      </div>
+      <p id="operation-description" class="muted"></p>
+      <div id="operation-error" class="inline-error" role="alert" hidden></div>
+      <div id="operation-fields"></div>
+      <div class="dialog-actions">
+        <button class="button quiet" type="button" data-close>Cancel</button>
+        <button id="operation-submit" class="button primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="conflict-dialog" aria-labelledby="conflict-title">
+    <form method="dialog">
+      <h2 id="conflict-title">This item changed</h2>
+      <p>Another operation updated it while this form was open. Reload the latest version before trying again.</p>
+      <div class="dialog-actions">
+        <button class="button primary" value="reload">Reload item</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

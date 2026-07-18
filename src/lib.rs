@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod remindi;
 pub mod scheduler;
 pub mod triggers;
+pub mod webui;
 
 #[path = "http/api/admin.rs"]
 pub mod admin_http_api;

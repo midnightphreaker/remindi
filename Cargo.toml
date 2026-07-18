@@ -42,6 +42,7 @@ uuid = { version = "1.18", features = ["serde", "v7"] }
 
 [dev-dependencies]
 rmcp = { version = "2.2", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+tempfile = "3.23"
 
 [lints.rust]
 unsafe_code = "forbid"
