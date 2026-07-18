@@ -168,7 +168,10 @@ fn password_reauthentication_updates_only_a_live_authenticated_session() {
             now + Duration::minutes(2),
         )
         .expect("reauthenticated");
-    assert_eq!(refreshed.reauthenticated_at, now + Duration::minutes(2));
+    assert_eq!(
+        refreshed.session.reauthenticated_at,
+        Some(now + Duration::minutes(2))
+    );
 }
 
 #[tokio::test]

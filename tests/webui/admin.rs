@@ -175,6 +175,17 @@ async fn call(
     csrf: Option<&str>,
     body: Option<Value>,
 ) -> (Response<Body>, Value) {
+    call_with_cookie(app, method, uri, csrf, None, body).await
+}
+
+async fn call_with_cookie(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    csrf: Option<&str>,
+    cookie: Option<&str>,
+    body: Option<Value>,
+) -> (Response<Body>, Value) {
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
@@ -183,6 +194,9 @@ async fn call(
         .header("x-request-id", "request-admin-test");
     if let Some(csrf) = csrf {
         request = request.header("x-csrf-token", csrf);
+    }
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
     }
     let body = if let Some(value) = body {
         request = request.header(header::CONTENT_TYPE, "application/json");
@@ -233,21 +247,53 @@ async fn guarded_restore_is_rejected_when_webui_authentication_is_disabled() {
 }
 
 #[tokio::test]
-async fn configured_credentials_do_not_enable_restore_when_webui_authentication_is_disabled() {
+async fn configured_credentials_require_password_and_enable_bounded_restore_proof() {
     let fixture = fixture().await;
     let csrf = csrf(&fixture.app).await;
 
     let (response, rejected) = call(
         &fixture.app,
         "POST",
+        "/auth/reauthenticate",
+        Some(&csrf),
+        Some(json!({"password": "wrong"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(rejected["error"]["code"], "REAUTHENTICATION_REQUIRED");
+
+    let (response, _) = call(
+        &fixture.app,
+        "POST",
+        "/auth/reauthenticate",
+        Some(&csrf),
+        Some(json!({"password": "password-private"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("reauthentication cookie")
+        .to_str()
+        .expect("cookie text")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_owned();
+
+    let (response, unavailable) = call_with_cookie(
+        &fixture.app,
+        "POST",
         "/backups/verified-backup/restore",
         Some(&csrf),
+        Some(&cookie),
         Some(json!({"confirmation": "RESTORE REMINDI"})),
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(rejected["error"]["code"], "REAUTHENTICATION_REQUIRED");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(unavailable["error"]["code"], "NOT_FOUND");
 }
 
 #[tokio::test]

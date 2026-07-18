@@ -22,7 +22,6 @@ use crate::admin::{
     backup::{BackupError, BackupRecord, BackupSource, RestoreFault, RestoreOutcome},
     workloads::{WorkloadAction, WorkloadComponent, WorkloadError},
 };
-use crate::auth::web_session::WebMode;
 
 use super::{WebApiState, actor, api_error, authorize_mutation, success};
 
@@ -381,9 +380,6 @@ async fn restore_backup(
     Path(id): Path<String>,
     Json(request): Json<RestoreRequest>,
 ) -> Response {
-    if state.sessions().mode() != WebMode::Authenticated {
-        return reauthentication_required(&headers);
-    }
     let actor = match admin_actor(&state, &headers, &Method::POST) {
         Ok(actor) => actor,
         Err(response) => return *response,
@@ -528,8 +524,11 @@ fn unavailable(headers: &HeaderMap) -> Response {
     )
 }
 
-fn recently_reauthenticated(reauthenticated_at: OffsetDateTime, now: OffsetDateTime) -> bool {
-    reauthenticated_at <= now && now - reauthenticated_at <= Duration::minutes(5)
+fn recently_reauthenticated(
+    reauthenticated_at: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> bool {
+    reauthenticated_at.is_some_and(|at| at <= now && now - at <= Duration::minutes(5))
 }
 
 #[cfg(test)]
@@ -540,14 +539,18 @@ mod tests {
     #[test]
     fn restore_reauthentication_window_is_exactly_five_minutes_and_not_future_dated() {
         let now = datetime!(2026-07-19 03:00 UTC);
-        assert!(recently_reauthenticated(now - Duration::minutes(5), now));
-        assert!(!recently_reauthenticated(
-            now - Duration::minutes(5) - Duration::nanoseconds(1),
+        assert!(recently_reauthenticated(
+            Some(now - Duration::minutes(5)),
             now
         ));
         assert!(!recently_reauthenticated(
-            now + Duration::nanoseconds(1),
+            Some(now - Duration::minutes(5) - Duration::nanoseconds(1)),
             now
         ));
+        assert!(!recently_reauthenticated(
+            Some(now + Duration::nanoseconds(1)),
+            now
+        ));
+        assert!(!recently_reauthenticated(None, now));
     }
 }

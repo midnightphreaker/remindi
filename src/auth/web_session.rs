@@ -32,7 +32,7 @@ pub struct SessionView {
     pub actor_id: String,
     pub csrf_token: String,
     pub expires_at: OffsetDateTime,
-    pub reauthenticated_at: OffsetDateTime,
+    pub reauthenticated_at: Option<OffsetDateTime>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +79,11 @@ struct StoredSession {
 pub struct LoginSuccess {
     pub session: SessionView,
     pub set_cookie: HeaderValue,
+}
+
+pub struct ReauthenticationSuccess {
+    pub session: SessionView,
+    pub set_cookie: Option<HeaderValue>,
 }
 
 impl WebSessionManager {
@@ -186,12 +191,23 @@ impl WebSessionManager {
     ) -> Result<SessionView, SessionError> {
         match self.inner.mode {
             WebMode::Disabled => Err(SessionError::Disabled),
-            WebMode::Unauthenticated => Ok(SessionView {
-                actor_id: "webui:unauthenticated".to_owned(),
-                csrf_token: self.inner.unauthenticated_csrf.clone(),
-                expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(365_000),
-                reauthenticated_at: now,
-            }),
+            WebMode::Unauthenticated => {
+                if let Some(id) = cookie_value(headers, SESSION_COOKIE) {
+                    let mut sessions = lock(&self.inner.sessions);
+                    if let Some(session) = sessions.get(id).cloned() {
+                        if session.expires_at > now {
+                            return Ok(view(session));
+                        }
+                        sessions.remove(id);
+                    }
+                }
+                Ok(SessionView {
+                    actor_id: "webui:unauthenticated".to_owned(),
+                    csrf_token: self.inner.unauthenticated_csrf.clone(),
+                    expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(365_000),
+                    reauthenticated_at: None,
+                })
+            }
             WebMode::Authenticated => {
                 let id =
                     cookie_value(headers, SESSION_COOKIE).ok_or(SessionError::Unauthenticated)?;
@@ -215,8 +231,8 @@ impl WebSessionManager {
         headers: &HeaderMap,
         password: &str,
         now: OffsetDateTime,
-    ) -> Result<SessionView, LoginError> {
-        if self.inner.mode != WebMode::Authenticated {
+    ) -> Result<ReauthenticationSuccess, LoginError> {
+        if self.inner.mode == WebMode::Disabled {
             return Err(LoginError::Disabled);
         }
         self.check_rate_limit(now)?;
@@ -224,6 +240,27 @@ impl WebSessionManager {
             .inner
             .password_digest
             .is_some_and(|expected| digest(password).ct_eq(&expected).into());
+        if self.inner.mode == WebMode::Unauthenticated {
+            if self.inner.username_digest.is_none() || !password_valid {
+                return Err(LoginError::InvalidCredentials);
+            }
+            let id = random_token().map_err(|()| LoginError::Randomness)?;
+            let stored = StoredSession {
+                actor_id: "webui:unauthenticated".to_owned(),
+                csrf_token: self.inner.unauthenticated_csrf.clone(),
+                expires_at: now + self.inner.ttl,
+                reauthenticated_at: now,
+            };
+            let mut sessions = lock(&self.inner.sessions);
+            sessions.retain(|_, session| session.expires_at > now);
+            evict_one_at_capacity(&mut sessions, MAX_SESSIONS);
+            sessions.insert(id.clone(), stored.clone());
+            let set_cookie = session_cookie(&id, self.inner.ttl, self.inner.cookie_secure)?;
+            return Ok(ReauthenticationSuccess {
+                session: view(stored),
+                set_cookie: Some(set_cookie),
+            });
+        }
         let id = cookie_value(headers, SESSION_COOKIE).ok_or(LoginError::InvalidCredentials)?;
         let mut sessions = lock(&self.inner.sessions);
         let session = sessions
@@ -234,7 +271,10 @@ impl WebSessionManager {
             return Err(LoginError::InvalidCredentials);
         }
         session.reauthenticated_at = now;
-        Ok(view(session.clone()))
+        Ok(ReauthenticationSuccess {
+            session: view(session.clone()),
+            set_cookie: None,
+        })
     }
 
     pub fn logout(&self, headers: &HeaderMap) -> HeaderValue {
@@ -314,8 +354,18 @@ fn view(session: StoredSession) -> SessionView {
         actor_id: session.actor_id,
         csrf_token: session.csrf_token,
         expires_at: session.expires_at,
-        reauthenticated_at: session.reauthenticated_at,
+        reauthenticated_at: Some(session.reauthenticated_at),
     }
+}
+
+fn session_cookie(id: &str, ttl: Duration, cookie_secure: bool) -> Result<HeaderValue, LoginError> {
+    let secure = if cookie_secure { "; Secure" } else { "" };
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        ttl.whole_seconds(),
+        secure
+    ))
+    .map_err(|_| LoginError::Randomness)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

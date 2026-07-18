@@ -293,17 +293,23 @@ async fn reauthenticate(
         .sessions
         .reauthenticate(&headers, &body.password, OffsetDateTime::now_utc())
     {
-        Ok(session) => success(
-            &headers,
-            SessionData {
-                authenticated: true,
-                authentication_required: true,
-                actor_id: Some(session.actor_id),
-                csrf_token: session.csrf_token,
-                expires_at: Some(format_time(session.expires_at)),
-                reauthentication_required: false,
-            },
-        ),
+        Ok(result) => {
+            let mut response = success(
+                &headers,
+                SessionData {
+                    authenticated: true,
+                    authentication_required: state.sessions.mode() == WebMode::Authenticated,
+                    actor_id: Some(result.session.actor_id),
+                    csrf_token: result.session.csrf_token,
+                    expires_at: Some(format_time(result.session.expires_at)),
+                    reauthentication_required: false,
+                },
+            );
+            if let Some(cookie) = result.set_cookie {
+                response.headers_mut().insert(header::SET_COOKIE, cookie);
+            }
+            response
+        }
         Err(LoginError::RateLimited) => api_error(
             &headers,
             StatusCode::TOO_MANY_REQUESTS,
