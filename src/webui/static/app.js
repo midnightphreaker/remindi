@@ -13,6 +13,7 @@ const state = {
   adapters: [],
   settings: [],
   workloads: [],
+  backups: [],
 };
 
 const elements = {
@@ -23,6 +24,7 @@ const elements = {
   adaptersView: document.querySelector("#adapters-view"),
   settingsView: document.querySelector("#settings-view"),
   workloadsView: document.querySelector("#workloads-view"),
+  backupsView: document.querySelector("#backups-view"),
   auditView: document.querySelector("#audit-view"),
   summary: document.querySelector("#summary"),
   attention: document.querySelector("#attention-list"),
@@ -44,6 +46,14 @@ const elements = {
   runtimeSettings: document.querySelector("#runtime-settings"),
   bootstrapSettings: document.querySelector("#bootstrap-settings"),
   workloadList: document.querySelector("#workload-list"),
+  backupList: document.querySelector("#backup-list"),
+  backupUploadForm: document.querySelector("#backup-upload-form"),
+  restoreDialog: document.querySelector("#restore-dialog"),
+  restoreForm: document.querySelector("#restore-form"),
+  restoreError: document.querySelector("#restore-error"),
+  restorePassword: document.querySelector("#restore-password"),
+  restoreConfirmation: document.querySelector("#restore-confirmation"),
+  restoreBackupId: document.querySelector("#restore-backup-id"),
   adminEvents: document.querySelector("#admin-events"),
 };
 
@@ -123,14 +133,24 @@ function bindEvents() {
       event.preventDefault();
       await controlWorkload(workload.dataset.component, workload.dataset.workloadAction);
     }
+    const backup = event.target.closest("[data-backup-action]");
+    if (backup) {
+      event.preventDefault();
+      if (backup.dataset.backupAction === "verify") await verifyBackup(backup.dataset.backupId);
+      else openRestore(backup.dataset.backupId, backup);
+    }
     if (event.target.closest("[data-close]")) closeOperation();
+    if (event.target.closest("[data-restore-close]")) closeRestore();
   });
   window.addEventListener("popstate", () => load());
   elements.loginForm.addEventListener("submit", login);
   elements.operationForm.addEventListener("submit", submitOperation);
+  elements.restoreForm.addEventListener("submit", submitRestore);
+  elements.backupUploadForm.addEventListener("submit", uploadBackup);
   elements.filters.addEventListener("submit", applyFilters);
   document.querySelector("#clear-filters").addEventListener("click", clearFilters);
   document.querySelector("#logout-button").addEventListener("click", logout);
+  document.querySelector("#create-backup").addEventListener("click", createBackup);
   document.querySelector("#detail-back").addEventListener("click", () => navigate({ view: "items", item: null }));
   document.querySelector("#next-page").addEventListener("click", () => {
     if (state.nextCursor) {
@@ -143,6 +163,12 @@ function bindEvents() {
     loadItems();
   });
   elements.operationDialog.addEventListener("close", restoreFocus);
+  elements.restoreDialog.addEventListener("close", () => {
+    elements.restoreForm.reset();
+    elements.restoreBackupId.value = "";
+    clearDialogError(elements.restoreError);
+    restoreFocus();
+  });
   document.addEventListener("submit", async (event) => {
     if (event.target.matches("[data-setting-form]")) await saveSetting(event);
     if (event.target.matches("[data-adapter-form]")) await saveAdapter(event);
@@ -193,6 +219,7 @@ async function load() {
   else if (view === "adapters") await loadAdapters();
   else if (view === "settings") await loadSettings();
   else if (view === "workloads") await loadWorkloads();
+  else if (view === "backups") await loadBackups();
   else if (view === "audit") await loadAudit();
   else await loadDashboard();
 }
@@ -204,6 +231,7 @@ function setView(view) {
   elements.adaptersView.hidden = view !== "adapters";
   elements.settingsView.hidden = view !== "settings";
   elements.workloadsView.hidden = view !== "workloads";
+  elements.backupsView.hidden = view !== "backups";
   elements.auditView.hidden = view !== "audit";
   document.querySelectorAll("[data-nav]").forEach((link) => {
     if (link.dataset.nav === view) link.setAttribute("aria-current", "page");
@@ -344,6 +372,119 @@ async function controlWorkload(component, action) {
     announce(`${component} ${action} completed.`);
     await loadWorkloads();
   } catch (error) { showPageError(error); }
+}
+
+async function loadBackups() {
+  try {
+    state.backups = await api("/backups");
+    elements.backupList.innerHTML = state.backups.length ? `<table>
+      <thead><tr><th>Created</th><th>Source</th><th>Status</th><th>Size</th><th>Schema</th><th>Actions</th></tr></thead>
+      <tbody>${state.backups.map((backup) => `<tr>
+        <td data-label="Created">${escapeHtml(formatDate(backup.created_at))}<div class="meta"><code>${escapeHtml(backup.file_name)}</code></div></td>
+        <td data-label="Source">${escapeHtml(backup.source)}</td>
+        <td data-label="Status"><span class="badge ${escapeHtml(backup.status)}">${escapeHtml(backup.status)}</span></td>
+        <td data-label="Size">${escapeHtml(formatBytes(backup.size_bytes))}</td>
+        <td data-label="Schema">${escapeHtml(backup.schema_version)}</td>
+        <td data-label="Actions"><div class="row-actions">
+          <a class="button" href="${API_ROOT}/backups/${encodeURIComponent(backup.id)}/download">Download</a>
+          <button class="button" type="button" data-backup-action="verify" data-backup-id="${escapeHtml(backup.id)}">Verify</button>
+          <button class="button danger" type="button" data-backup-action="restore" data-backup-id="${escapeHtml(backup.id)}" ${backup.status === "ready" ? "" : "disabled"}>Restore</button>
+        </div></td>
+      </tr>`).join("")}</tbody>
+    </table>` : `<div class="empty"><h2>No backups yet</h2><p>Create a verified manual backup or upload a SQLite database.</p></div>`;
+  } catch (error) { showPageError(error); }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return String(value ?? "");
+  if (bytes < 1024) return `${number.format(bytes)} B`;
+  const units = ["KiB", "MiB", "GiB"];
+  let amount = bytes;
+  let unit = -1;
+  do {
+    amount /= 1024;
+    unit += 1;
+  } while (amount >= 1024 && unit < units.length - 1);
+  return `${number.format(Number(amount.toFixed(1)))} ${units[unit]}`;
+}
+
+async function createBackup() {
+  try {
+    await api("/backups", { method: "POST" });
+    announce("Verified backup created.");
+    await loadBackups();
+  } catch (error) { showPageError(error); }
+}
+
+async function uploadBackup(event) {
+  event.preventDefault();
+  if (!elements.backupUploadForm.reportValidity()) return;
+  const data = new FormData(elements.backupUploadForm);
+  try {
+    await api("/backups/upload", { method: "POST", body: data });
+    elements.backupUploadForm.reset();
+    announce("Backup uploaded and verified.");
+    await loadBackups();
+  } catch (error) { showPageError(error); }
+}
+
+async function verifyBackup(id) {
+  try {
+    await api(`/backups/${encodeURIComponent(id)}/verify`, { method: "POST" });
+    announce("Backup verification passed.");
+    await loadBackups();
+  } catch (error) { showPageError(error); }
+}
+
+function openRestore(id, invoker) {
+  state.restoreFocus = invoker || document.activeElement;
+  elements.restoreForm.reset();
+  elements.restoreBackupId.value = id;
+  clearDialogError(elements.restoreError);
+  elements.restoreDialog.showModal();
+  requestAnimationFrame(() => elements.restorePassword.focus());
+}
+
+function closeRestore() {
+  if (elements.restoreDialog.open) elements.restoreDialog.close();
+}
+
+async function submitRestore(event) {
+  event.preventDefault();
+  clearDialogError(elements.restoreError);
+  if (!validateRequired(elements.restoreForm)) return;
+  if (elements.restoreConfirmation.value !== "RESTORE REMINDI") {
+    elements.restoreConfirmation.setAttribute("aria-invalid", "true");
+    elements.restoreConfirmation.focus();
+    showDialogError(elements.restoreError, "Type RESTORE REMINDI exactly.");
+    return;
+  }
+  const backupId = elements.restoreBackupId.value;
+  let password = elements.restorePassword.value;
+  elements.restorePassword.value = "";
+  const submit = elements.restoreForm.querySelector("[type='submit']");
+  submit.disabled = true;
+  try {
+    await api("/auth/reauthenticate", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+    password = "";
+    await api(`/backups/${encodeURIComponent(backupId)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "RESTORE REMINDI" }),
+    });
+    closeRestore();
+    announce("Database restored from the verified backup.");
+    await loadBackups();
+  } catch (error) {
+    password = "";
+    showDialogError(elements.restoreError, error.message);
+  } finally {
+    password = "";
+    submit.disabled = false;
+  }
 }
 
 async function loadAudit() {
@@ -588,7 +729,11 @@ function validateRequired(form) {
   if (!invalid) return true;
   invalid.setAttribute("aria-invalid", "true");
   invalid.focus();
-  const target = form === elements.loginForm ? elements.loginError : elements.operationError;
+  const target = form === elements.loginForm
+    ? elements.loginError
+    : form === elements.restoreForm
+      ? elements.restoreError
+      : elements.operationError;
   showDialogError(target, `${invalid.labels?.[0]?.textContent || "This field"} is required.`);
   return false;
 }

@@ -83,6 +83,13 @@ main { width: min(74rem, calc(100% - 2rem)); margin-inline: auto; padding-block:
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
 }
 .admin-grid textarea { min-height: 12rem; }
+.upload-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+}
+.upload-row .field { margin-block: 0; }
 
 .button, .icon-button, .back-link {
   min-height: 2.75rem; border: 1px solid rgb(86 182 255 / .4); border-radius: 7px;
@@ -157,6 +164,7 @@ dialog form { margin: 0; }
   main { width: min(100% - 1rem, 42rem); }
   .summary-grid { grid-template-columns: repeat(2, 1fr); }
   .filter-grid { grid-template-columns: 1fr; }
+  .upload-row { grid-template-columns: 1fr; }
   .table-shell { border: 0; background: transparent; box-shadow: none; }
   table, thead, tbody, tr, th, td { display: block; }
   thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }

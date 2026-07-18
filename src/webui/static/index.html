@@ -23,6 +23,7 @@
       <a href="?view=adapters" data-nav="adapters">Adapters</a>
       <a href="?view=settings" data-nav="settings">Settings</a>
       <a href="?view=workloads" data-nav="workloads">Workloads</a>
+      <a href="?view=backups" data-nav="backups">Backups</a>
       <a href="?view=audit" data-nav="audit">Audit</a>
     </nav>
     <button id="logout-button" class="button quiet" type="button">Sign out</button>
@@ -125,6 +126,22 @@
       <div id="workload-list" class="admin-grid" aria-live="polite"></div>
     </section>
 
+    <section id="backups-view" aria-labelledby="backups-title" hidden>
+      <div class="heading-row">
+        <div><p class="eyebrow">Verified recovery points</p><h1 id="backups-title">Backups</h1></div>
+        <button id="create-backup" class="button primary" type="button">Create backup</button>
+      </div>
+      <p class="muted">Download or verify any backup. Restore is guarded by password reauthentication and an exact typed confirmation.</p>
+      <form id="backup-upload-form" class="panel upload-row">
+        <div class="field">
+          <label for="backup-upload">Upload SQLite backup</label>
+          <input id="backup-upload" name="file" type="file" accept=".sqlite,.sqlite3,application/vnd.sqlite3,application/x-sqlite3" required>
+        </div>
+        <button class="button" type="submit">Upload and verify</button>
+      </form>
+      <div id="backup-list" class="panel table-shell" aria-live="polite"></div>
+    </section>
+
     <section id="audit-view" aria-labelledby="audit-title" hidden>
       <div class="heading-row">
         <div><p class="eyebrow">Immutable administrative history</p><h1 id="audit-title">Administrative audit</h1></div>
@@ -164,6 +181,30 @@
       <div class="dialog-actions">
         <button class="button quiet" type="button" data-close>Cancel</button>
         <button id="operation-submit" class="button primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="restore-dialog" aria-labelledby="restore-title">
+    <form id="restore-form" method="dialog" novalidate>
+      <div class="dialog-heading">
+        <h2 id="restore-title">Restore verified backup</h2>
+        <button class="icon-button" type="button" data-restore-close aria-label="Close restore dialog">×</button>
+      </div>
+      <p class="muted">This replaces the live database after taking a verified pre-restore backup. MCP and scheduler are temporarily quiesced.</p>
+      <div id="restore-error" class="inline-error" role="alert" hidden></div>
+      <input id="restore-backup-id" name="backup_id" type="hidden">
+      <div class="field">
+        <label for="restore-password">Current password</label>
+        <input id="restore-password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="restore-confirmation">Type <code>RESTORE REMINDI</code></label>
+        <input id="restore-confirmation" name="confirmation" required autocomplete="off" spellcheck="false">
+      </div>
+      <div class="dialog-actions">
+        <button class="button quiet" type="button" data-restore-close>Cancel</button>
+        <button class="button danger" type="submit">Restore database</button>
       </div>
     </form>
   </dialog>

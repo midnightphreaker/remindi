@@ -39,7 +39,11 @@ async fn embedded_ui_serves_semantic_dependency_free_application() {
         r#"id="adapters-view""#,
         r#"id="settings-view""#,
         r#"id="workloads-view""#,
+        r#"id="backups-view""#,
         r#"id="audit-view""#,
+        r#"<dialog id="restore-dialog""#,
+        r#"<input id="restore-password" name="password" type="password""#,
+        r#"<input id="restore-confirmation" name="confirmation""#,
     ] {
         assert!(html.contains(required), "missing {required}");
     }
@@ -144,6 +148,42 @@ async fn embedded_ui_payloads_track_the_strict_web_api_contract() {
         assert!(
             !js.contains(legacy),
             "legacy mock-only mapping remains: {legacy}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn backup_assets_cover_verified_inventory_and_guarded_restore() {
+    let assets = Arc::new(WebUiAssets::embedded("Remindi"));
+    let js = response_text(router(assets), "/assets/app.js").await;
+
+    for required in [
+        r#"api("/backups")"#,
+        r#"api("/backups", { method: "POST" })"#,
+        r#"api("/backups/upload", { method: "POST", body: data })"#,
+        r#"`/backups/${encodeURIComponent(id)}/verify`"#,
+        r#"${API_ROOT}/backups/${encodeURIComponent(backup.id)}/download"#,
+        r#"api("/auth/reauthenticate""#,
+        r#"`/backups/${encodeURIComponent(backupId)}/restore`"#,
+        r#"elements.restoreConfirmation.value !== "RESTORE REMINDI""#,
+        r#"body: JSON.stringify({ confirmation: "RESTORE REMINDI" })"#,
+        r#"elements.restorePassword.value = """#,
+        r#"backup.status === "ready" ? "" : "disabled""#,
+    ] {
+        assert!(
+            js.contains(required),
+            "missing backup/restore flow {required}"
+        );
+    }
+
+    for forbidden in [
+        r#"localStorage.setItem("restore"#,
+        r#"sessionStorage.setItem("restore"#,
+        r#"sessionStorage.setItem("password"#,
+    ] {
+        assert!(
+            !js.contains(forbidden),
+            "restore credential persisted by browser: {forbidden}"
         );
     }
 }
