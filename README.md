@@ -31,6 +31,107 @@ Only `/data` is persistent and writable. It contains `remindi.db` and the
 `backups/` directory. The image runs as numeric UID/GID `10001:10001` with a
 read-only root filesystem and no Docker socket or container-control access.
 
+## Add Remindi to MCP clients
+
+The examples below use the local Compose endpoint. Export the same token given
+to the Remindi container before starting the client:
+
+```sh
+export REMINDI_MCP_TOKEN='replace-with-the-token-from-your-private-.env'
+```
+
+Do not commit the token. If the client runs on another host, replace
+`http://127.0.0.1:8000/mcp` with the HTTPS URL exposed by your trusted reverse
+proxy.
+
+### Codex
+
+Codex accepts a Streamable HTTP URL and the *name* of the environment variable
+that supplies its bearer token:
+
+```sh
+codex mcp add remindi \
+  --url http://127.0.0.1:8000/mcp \
+  --bearer-token-env-var REMINDI_MCP_TOKEN
+codex mcp get remindi --json
+```
+
+This updates the shared Codex MCP configuration used by the CLI and IDE
+extension. See the [Codex MCP documentation](https://developers.openai.com/codex/mcp/).
+
+### Claude Code
+
+Add this project-scoped `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "remindi": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REMINDI_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Claude Code expands `${REMINDI_MCP_TOKEN}` in HTTP headers. Run
+`claude mcp get remindi` to inspect the entry, or `claude mcp list` to check its
+status. For a private user-wide entry instead, use `claude mcp add` with
+`--scope user`. See the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+### OpenCode
+
+Add this to `opencode.json` (or merge the `mcp` member into the existing file):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "remindi": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8000/mcp",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:REMINDI_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+OpenCode uses `{env:REMINDI_MCP_TOKEN}` rather than shell-style expansion.
+`oauth` is disabled because Remindi uses a fixed bearer token. Verify the
+connection with `opencode mcp list`. See the
+[OpenCode MCP server documentation](https://opencode.ai/docs/mcp-servers/).
+
+### Cursor
+
+Add this to the global `~/.cursor/mcp.json`, or merge it into
+`.cursor/mcp.json` for project-only use:
+
+```json
+{
+  "mcpServers": {
+    "remindi": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:REMINDI_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Cursor resolves `${env:REMINDI_MCP_TOKEN}` from the environment of the Cursor
+process. Restart Cursor after exporting the variable, then check
+**Settings > Tools & MCP** for `remindi`. See the
+[Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol).
+
 ## Configuration boundary
 
 Bootstrap settings are read from the environment once at startup. Identity,
