@@ -137,12 +137,14 @@ async fn login(
     if csrf::validate_same_origin(&headers).is_err() {
         return csrf_error(&headers);
     }
-    let token = match headers
-        .get(CSRF_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some(token) => token,
-        None => return csrf_error(&headers),
+    let token = match (
+        headers.get_all(CSRF_HEADER).iter().count(),
+        headers
+            .get(CSRF_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        (1, Some(token)) => token,
+        _ => return csrf_error(&headers),
     };
     match state.sessions.login(
         &body.username,

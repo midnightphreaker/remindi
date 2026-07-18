@@ -49,6 +49,9 @@ pub fn validate_mutation(
         return Ok(());
     }
     validate_same_origin(headers)?;
+    if headers.get_all(CSRF_HEADER).iter().count() != 1 {
+        return Err(CsrfError::MissingToken);
+    }
     let supplied = headers
         .get(CSRF_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -88,6 +91,11 @@ mod tests {
         assert_eq!(
             validate_mutation(&Method::POST, &headers, "wrong"),
             Err(CsrfError::InvalidToken)
+        );
+        headers.append("x-csrf-token", HeaderValue::from_static("right"));
+        assert_eq!(
+            validate_mutation(&Method::POST, &headers, "right"),
+            Err(CsrfError::MissingToken)
         );
     }
 }
