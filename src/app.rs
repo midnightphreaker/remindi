@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use crate::{
     clock::{Clock, IdGenerator},
     config::BootstrapConfig,
+    db::DatabaseManager,
 };
 
 /// Shared state for the always-on control plane.
@@ -20,6 +21,7 @@ pub struct AppState {
     bootstrap: Arc<BootstrapConfig>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
+    database: Option<Arc<DatabaseManager>>,
     ready: Arc<AtomicBool>,
 }
 
@@ -35,8 +37,16 @@ impl AppState {
             bootstrap,
             clock,
             ids,
+            database: None,
             ready: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Attaches the process-owned database after successful startup checks.
+    #[must_use]
+    pub fn with_database(mut self, database: Arc<DatabaseManager>) -> Self {
+        self.database = Some(database);
+        self
     }
 
     /// Returns immutable bootstrap configuration.
@@ -55,6 +65,12 @@ impl AppState {
     #[must_use]
     pub fn ids(&self) -> &dyn IdGenerator {
         self.ids.as_ref()
+    }
+
+    /// Returns the database boundary when startup has attached it.
+    #[must_use]
+    pub fn database(&self) -> Option<&DatabaseManager> {
+        self.database.as_deref()
     }
 
     /// Reports whether all currently implemented readiness checks pass.
