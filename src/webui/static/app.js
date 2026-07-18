@@ -1,4 +1,4 @@
-const API_ROOT = "/api/v1";
+const API_ROOT = new URL("api/v1", document.baseURI).pathname.replace(/\/$/, "");
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const number = new Intl.NumberFormat();
 

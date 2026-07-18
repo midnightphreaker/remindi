@@ -35,7 +35,7 @@ async fn embedded_ui_serves_semantic_dependency_free_application() {
         r#"<main id="main-content""#,
         r#"<dialog id="login-dialog""#,
         r#"aria-live="polite""#,
-        r#"<script type="module" src="/assets/app.js"></script>"#,
+        r#"<script type="module" src="assets/app.js"></script>"#,
         r#"id="adapters-view""#,
         r#"id="settings-view""#,
         r#"id="workloads-view""#,
@@ -62,7 +62,9 @@ async fn assets_cover_all_flows_accessibility_and_mobile_states() {
     let css = response_text(app.clone(), "/assets/app.css").await;
     let js = response_text(app, "/assets/app.js").await;
 
-    assert!(js.contains(r#"const API_ROOT = "/api/v1""#));
+    assert!(js.contains(
+        r#"const API_ROOT = new URL("api/v1", document.baseURI).pathname.replace(/\/$/, "")"#
+    ));
     for route in [
         "/session",
         "/auth/login",
@@ -103,6 +105,53 @@ async fn assets_cover_all_flows_accessibility_and_mobile_states() {
         "overflow-wrap: anywhere",
     ] {
         assert!(css.contains(behavior), "missing CSS behavior {behavior}");
+    }
+}
+
+#[test]
+fn browser_relative_urls_support_root_and_prefixed_mounts() {
+    let html = include_str!("../../src/webui/static/index.html");
+    for asset in [
+        "assets/favicon",
+        "assets/app.css",
+        "assets/custom.css",
+        "assets/app.js",
+        "assets/logo",
+    ] {
+        assert!(
+            html.contains(&format!(r#""{asset}""#)),
+            "missing relative asset reference {asset}"
+        );
+        assert_eq!(
+            reqwest::Url::parse("https://mcp.phrk.org/")
+                .unwrap()
+                .join(asset)
+                .unwrap()
+                .path(),
+            format!("/{asset}")
+        );
+        assert_eq!(
+            reqwest::Url::parse("https://mcp.phrk.org/remindi-ui/")
+                .unwrap()
+                .join(asset)
+                .unwrap()
+                .path(),
+            format!("/remindi-ui/{asset}")
+        );
+    }
+
+    for (document, expected) in [
+        ("https://mcp.phrk.org/", "/api/v1"),
+        ("https://mcp.phrk.org/remindi-ui/", "/remindi-ui/api/v1"),
+    ] {
+        assert_eq!(
+            reqwest::Url::parse(document)
+                .unwrap()
+                .join("api/v1")
+                .unwrap()
+                .path(),
+            expected
+        );
     }
 }
 
