@@ -100,22 +100,33 @@ async fn fixture_with_runtimes(
     mcp: Arc<dyn WorkloadRuntime>,
     scheduler: Arc<dyn WorkloadRuntime>,
 ) -> Fixture {
+    fixture_with_runtimes_and_credentials(mcp, scheduler, true).await
+}
+
+async fn fixture_with_runtimes_and_credentials(
+    mcp: Arc<dyn WorkloadRuntime>,
+    scheduler: Arc<dyn WorkloadRuntime>,
+    include_credentials: bool,
+) -> Fixture {
     let directory = std::env::temp_dir().join(format!("remindi-web-admin-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&directory).expect("temporary directory");
-    let config = Arc::new(
-        BootstrapConfig::from_pairs([
-            (
-                "REMINDI_DB_PATH",
-                directory.join("remindi.db").to_str().expect("UTF-8 path"),
-            ),
-            ("REMINDI_OWNER_ID", "owner-private"),
-            ("REMINDI_MCP_TOKEN", "mcp-private-token"),
-            ("REMINDI_WEBUI_AUTH", "false"),
+    let database_path = directory.join("remindi.db");
+    let mut values = vec![
+        (
+            "REMINDI_DB_PATH",
+            database_path.to_str().expect("UTF-8 path"),
+        ),
+        ("REMINDI_OWNER_ID", "owner-private"),
+        ("REMINDI_MCP_TOKEN", "mcp-private-token"),
+        ("REMINDI_WEBUI_AUTH", "false"),
+    ];
+    if include_credentials {
+        values.extend([
             ("REMINDI_WEBUI_USERNAME", "username-private"),
             ("REMINDI_WEBUI_PASSWORD", "password-private"),
-        ])
-        .expect("config"),
-    );
+        ]);
+    }
+    let config = Arc::new(BootstrapConfig::from_pairs(values).expect("config"));
     let database = Arc::new(
         DatabaseManager::open(config.database_path())
             .await
@@ -196,6 +207,47 @@ async fn csrf(app: &Router) -> String {
         .as_str()
         .expect("CSRF token")
         .to_owned()
+}
+
+#[tokio::test]
+async fn guarded_restore_is_rejected_when_webui_authentication_is_disabled() {
+    let fixture = fixture_with_runtimes_and_credentials(
+        Arc::new(ProbeRuntime(AtomicBool::new(false))),
+        Arc::new(ProbeRuntime(AtomicBool::new(false))),
+        false,
+    )
+    .await;
+    let csrf = csrf(&fixture.app).await;
+
+    let (response, rejected) = call(
+        &fixture.app,
+        "POST",
+        "/backups/verified-backup/restore",
+        Some(&csrf),
+        Some(json!({"confirmation": "RESTORE REMINDI"})),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(rejected["error"]["code"], "REAUTHENTICATION_REQUIRED");
+}
+
+#[tokio::test]
+async fn configured_credentials_do_not_enable_restore_when_webui_authentication_is_disabled() {
+    let fixture = fixture().await;
+    let csrf = csrf(&fixture.app).await;
+
+    let (response, rejected) = call(
+        &fixture.app,
+        "POST",
+        "/backups/verified-backup/restore",
+        Some(&csrf),
+        Some(json!({"confirmation": "RESTORE REMINDI"})),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(rejected["error"]["code"], "REAUTHENTICATION_REQUIRED");
 }
 
 #[tokio::test]

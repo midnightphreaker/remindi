@@ -22,6 +22,7 @@ use crate::admin::{
     backup::{BackupError, BackupRecord, BackupSource, RestoreFault, RestoreOutcome},
     workloads::{WorkloadAction, WorkloadComponent, WorkloadError},
 };
+use crate::auth::web_session::WebMode;
 
 use super::{WebApiState, actor, api_error, authorize_mutation, success};
 
@@ -380,6 +381,9 @@ async fn restore_backup(
     Path(id): Path<String>,
     Json(request): Json<RestoreRequest>,
 ) -> Response {
+    if state.sessions().mode() != WebMode::Authenticated {
+        return reauthentication_required(&headers);
+    }
     let actor = match admin_actor(&state, &headers, &Method::POST) {
         Ok(actor) => actor,
         Err(response) => return *response,
@@ -387,26 +391,10 @@ async fn restore_backup(
     let now = OffsetDateTime::now_utc();
     let session = match state.sessions().authenticate(&headers, now) {
         Ok(session) => session,
-        Err(_) => {
-            return api_error(
-                &headers,
-                StatusCode::UNAUTHORIZED,
-                "REAUTHENTICATION_REQUIRED",
-                "Recent password verification is required.",
-                false,
-                None,
-            );
-        }
+        Err(_) => return reauthentication_required(&headers),
     };
     if !recently_reauthenticated(session.reauthenticated_at, now) {
-        return api_error(
-            &headers,
-            StatusCode::UNAUTHORIZED,
-            "REAUTHENTICATION_REQUIRED",
-            "Recent password verification is required.",
-            false,
-            None,
-        );
+        return reauthentication_required(&headers);
     }
     let Some(restore) = state.restore() else {
         return unavailable(&headers);
@@ -418,6 +406,17 @@ async fn restore_backup(
         Ok(data) => success::<RestoreOutcome>(&headers, data),
         Err(error) => backup_error(&headers, error),
     }
+}
+
+fn reauthentication_required(headers: &HeaderMap) -> Response {
+    api_error(
+        headers,
+        StatusCode::UNAUTHORIZED,
+        "REAUTHENTICATION_REQUIRED",
+        "Recent password verification is required.",
+        false,
+        None,
+    )
 }
 
 fn created(headers: &HeaderMap, data: BackupRecord) -> Response {
