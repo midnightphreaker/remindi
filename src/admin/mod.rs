@@ -2,6 +2,7 @@
 
 pub mod adapters;
 pub mod audit;
+pub mod backup;
 pub mod settings;
 pub mod workloads;
 
