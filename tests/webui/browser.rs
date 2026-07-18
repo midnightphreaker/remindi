@@ -91,6 +91,52 @@ async fn assets_cover_all_flows_accessibility_and_mobile_states() {
 }
 
 #[tokio::test]
+async fn embedded_ui_payloads_track_the_strict_web_api_contract() {
+    let assets = Arc::new(WebUiAssets::embedded("Remindi"));
+    let js = response_text(router(assets), "/assets/app.js").await;
+
+    for required in [
+        r#"field("message", "Message""#,
+        r#"field("instructions", "Instructions"#,
+        r#"field("project_id", "Project""#,
+        r#"selectField("lifecycle_event", "Lifecycle event""#,
+        r#"message: values.message"#,
+        r#"priority: values.priority"#,
+        r#"trigger: { type: "at_time""#,
+        r#"lifecycle_event: values.lifecycle_event"#,
+        r#"kind === "check" ? JSON.stringify(body) : mutationBody(body)"#,
+        r#"reference_uri: values.reference_uri"#,
+        r#"snooze_until: new Date(values.snooze_until).toISOString()"#,
+        r#"query.set("states", states)"#,
+        r#"state.selected.message"#,
+        r#"state.selected.instructions"#,
+        r#"state.selected.snooze_until"#,
+        r#"`operation-${name}`"#,
+    ] {
+        assert!(
+            js.contains(required),
+            "missing strict Web API mapping {required}"
+        );
+    }
+
+    for legacy in [
+        r#"title: values.title"#,
+        r#"priority: Number(values.priority)"#,
+        r#"type: "time""#,
+        r#"notes: values.notes"#,
+        r#"type: "manual_verification""#,
+        r#"references: [values.reference]"#,
+        r#"until: new Date(values.until)"#,
+        r#"<label for="${name}">"#,
+    ] {
+        assert!(
+            !js.contains(legacy),
+            "legacy mock-only mapping remains: {legacy}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn title_is_escaped_and_unknown_asset_is_normal_404() {
     let assets = Arc::new(WebUiAssets::embedded(r#"<script>alert("x")</script>"#));
     let app = router(assets);

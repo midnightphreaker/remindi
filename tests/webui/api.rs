@@ -103,6 +103,7 @@ fn add_body(key: &str, message: &str) -> Value {
         "project_id": "project-a",
         "task_id": "task-a",
         "message": message,
+        "instructions": null,
         "priority": "high",
         "trigger": {"type": "at_time", "at": "2026-07-19T05:00:00Z"},
         "overdue_after_seconds": 60,
@@ -164,6 +165,8 @@ async fn all_eight_operations_share_service_semantics() {
         Some(json!({
             "expected_version": snooze["data"]["remindi"]["version"],
             "message": "Updated reminder",
+            "instructions": "Use the safe sequence",
+            "priority": "critical",
             "reason": "Clarify the action",
             "idempotency_key": "update-0001"
         })),
@@ -171,7 +174,14 @@ async fn all_eight_operations_share_service_semantics() {
     .await;
     assert_eq!(updated["data"]["remindi"]["message"], "Updated reminder");
 
-    let (_, listed) = call(&app, "GET", "/remindi?project_id=project-a", None, None).await;
+    let (_, listed) = call(
+        &app,
+        "GET",
+        "/remindi?project_id=project-a&states=snoozed",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 1);
 
     let (_, second) = call(
@@ -206,7 +216,7 @@ async fn all_eight_operations_share_service_semantics() {
         Some(json!({
             "expected_version": version,
             "evidence": {
-                "type": "test_result",
+                "type": "observation",
                 "summary": "Web API acceptance passed",
                 "reference_uri": "https://example.invalid/run/1",
                 "observed_at": "2026-07-19T06:00:00Z"

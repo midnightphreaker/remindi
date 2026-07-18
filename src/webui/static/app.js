@@ -195,14 +195,19 @@ async function loadDashboard() {
 async function loadItems() {
   const params = new URLSearchParams(location.search);
   const query = new URLSearchParams({ limit: "25" });
-  for (const key of ["q", "state", "project_id"]) {
-    const value = params.get(key);
-    if (value) query.set(key, value);
-  }
+  const projectId = params.get("project_id");
+  const states = params.get("state");
+  if (projectId) query.set("project_id", projectId);
+  if (states) query.set("states", states);
   if (state.cursor) query.set("cursor", state.cursor);
   try {
     const result = await api(`/remindi?${query}`);
-    state.items = normaliseItems(result);
+    const search = (params.get("q") || "").trim().toLocaleLowerCase();
+    state.items = normaliseItems(result).filter((item) => !search || [
+      item.message,
+      item.project_id,
+      item.task_id,
+    ].some((value) => String(value || "").toLocaleLowerCase().includes(search)));
     state.nextCursor = result?.next_cursor || null;
     renderTable(elements.itemList, state.items);
     document.querySelector("#next-page").disabled = !state.nextCursor;
@@ -235,10 +240,10 @@ function renderTable(container, items, compact = false) {
   container.innerHTML = `<table>
     <thead><tr><th class="title-cell">Item</th><th>State</th><th>Priority</th><th>Next fire</th><th>Actions</th></tr></thead>
     <tbody>${items.map((item) => `<tr>
-      <td class="title-cell" data-label="Item"><button class="back-link item-title" data-action="details" data-id="${escapeHtml(item.id)}">${escapeHtml(item.title)}</button><div class="meta">${escapeHtml(item.project_id || "No project")}${item.task_id ? ` · ${escapeHtml(item.task_id)}` : ""}</div></td>
+      <td class="title-cell" data-label="Item"><button class="back-link item-title" data-action="details" data-id="${escapeHtml(item.id)}">${escapeHtml(item.message)}</button><div class="meta">${escapeHtml(item.project_id || "No project")}${item.task_id ? ` · ${escapeHtml(item.task_id)}` : ""}</div></td>
       <td data-label="State"><span class="badge ${escapeHtml(itemState(item))}">${escapeHtml(itemState(item))}</span></td>
       <td data-label="Priority">${escapeHtml(item.priority ?? 0)}</td>
-      <td data-label="Next fire">${escapeHtml(formatDate(item.next_fire_at || item.due_at || item.snoozed_until))}</td>
+      <td data-label="Next fire">${escapeHtml(formatDate(item.next_fire_at || item.snooze_until))}</td>
       <td data-label="Actions"><div class="row-actions">
         <button class="button" data-action="snooze" data-id="${escapeHtml(item.id)}">Snooze</button>
         <button class="button" data-action="complete" data-id="${escapeHtml(item.id)}">Complete</button>
@@ -257,14 +262,14 @@ async function showDetail(id, push = true) {
     if (push) navigate({ view: "detail", item: id }, false);
     setView("detail");
     elements.detailContent.innerHTML = `
-      <div class="heading-row"><div><p class="eyebrow">${escapeHtml(itemState(state.selected))}</p><h1 id="detail-title">${escapeHtml(state.selected.title)}</h1></div>
+      <div class="heading-row"><div><p class="eyebrow">${escapeHtml(itemState(state.selected))}</p><h1 id="detail-title">${escapeHtml(state.selected.message)}</h1></div>
         <div class="button-row"><button class="button" data-action="update" data-id="${escapeHtml(id)}">Edit</button><button class="button" data-action="complete" data-id="${escapeHtml(id)}">Complete</button></div></div>
       <div class="detail-grid">
         <section class="panel"><h2>Details</h2><dl class="detail-list">
           <dt>ID</dt><dd>${escapeHtml(id)}</dd><dt>Project</dt><dd>${escapeHtml(state.selected.project_id || "None")}</dd>
           <dt>Task</dt><dd>${escapeHtml(state.selected.task_id || "None")}</dd><dt>Priority</dt><dd>${escapeHtml(state.selected.priority ?? 0)}</dd>
-          <dt>Next fire</dt><dd>${escapeHtml(formatDate(state.selected.next_fire_at))}</dd><dt>Version</dt><dd>${escapeHtml(state.selected.version)}</dd>
-          <dt>Notes</dt><dd>${escapeHtml(state.selected.notes || "No notes")}</dd>
+          <dt>Next fire</dt><dd>${escapeHtml(formatDate(state.selected.next_fire_at || state.selected.snooze_until))}</dd><dt>Version</dt><dd>${escapeHtml(state.selected.version)}</dd>
+          <dt>Instructions</dt><dd>${escapeHtml(state.selected.instructions || "No instructions")}</dd>
         </dl></section>
         <section class="panel"><h2>History</h2><ol class="history-list">${normaliseHistory(history).map((entry) => `<li><strong>${escapeHtml(entry.event_type || entry.type || "changed")}</strong><div class="meta">${escapeHtml(formatDate(entry.created_at || entry.occurred_at))}</div><p>${escapeHtml(entry.details?.reason || entry.reason || "")}</p></li>`).join("") || "<li>No history recorded.</li>"}</ol></section>
       </div>`;
@@ -307,25 +312,42 @@ function operationDescription(kind) {
 }
 
 function field(name, label, value = "", options = {}) {
-  const described = `${name}-help`;
-  if (options.type === "textarea") return `<div class="field"><label for="${name}">${label}</label><textarea id="${name}" name="${name}" ${options.required ? "required" : ""} aria-describedby="${described}">${escapeHtml(value)}</textarea>${options.help ? `<small id="${described}" class="muted">${escapeHtml(options.help)}</small>` : ""}</div>`;
-  return `<div class="field"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="${options.type || "text"}" value="${escapeHtml(value)}" ${options.required ? "required" : ""} ${options.min !== undefined ? `min="${options.min}"` : ""} aria-describedby="${described}">${options.help ? `<small id="${described}" class="muted">${escapeHtml(options.help)}</small>` : ""}</div>`;
+  const id = `operation-${name}`;
+  const described = `${id}-help`;
+  if (options.type === "textarea") return `<div class="field"><label for="${id}">${label}</label><textarea id="${id}" name="${name}" ${options.required ? "required" : ""} aria-describedby="${described}">${escapeHtml(value)}</textarea>${options.help ? `<small id="${described}" class="muted">${escapeHtml(options.help)}</small>` : ""}</div>`;
+  return `<div class="field"><label for="${id}">${label}</label><input id="${id}" name="${name}" type="${options.type || "text"}" value="${escapeHtml(value)}" ${options.required ? "required" : ""} ${options.min !== undefined ? `min="${options.min}"` : ""} aria-describedby="${described}">${options.help ? `<small id="${described}" class="muted">${escapeHtml(options.help)}</small>` : ""}</div>`;
+}
+
+function selectField(name, label, value, choices, options = {}) {
+  const id = `operation-${name}`;
+  return `<div class="field"><label for="${id}">${label}</label><select id="${id}" name="${name}" ${options.required ? "required" : ""}>${choices.map((choice) => `<option value="${escapeHtml(choice)}" ${choice === value ? "selected" : ""}>${escapeHtml(choice.replaceAll("_", " "))}</option>`).join("")}</select></div>`;
 }
 
 function operationFields(kind, item) {
   const expected = item ? `<input type="hidden" name="expected_version" value="${escapeHtml(item.version)}">` : "";
   if (kind === "add") return [
-    field("title", "Title", "", { required: true }),
+    field("message", "Message", "", { required: true }),
     field("project_id", "Project", "", { required: true }),
     field("task_id", "Task (optional)"),
-    field("priority", "Priority", "0", { type: "number", min: -100 }),
+    selectField("priority", "Priority", "normal", ["low", "normal", "high", "critical"], { required: true }),
     field("due_at", "Due at", "", { type: "datetime-local", required: true }),
-    field("notes", "Notes (optional)", "", { type: "textarea", help: "Long text wraps without hiding actions." }),
+    field("instructions", "Instructions (optional)", "", { type: "textarea", help: "Long text wraps without hiding actions." }),
   ].join("");
-  if (kind === "check") return field("limit", "Maximum items", "25", { type: "number", min: 1 });
-  if (kind === "update") return expected + field("title", "Title", item?.title, { required: true }) + field("priority", "Priority", item?.priority ?? 0, { type: "number", min: -100 }) + field("notes", "Notes", item?.notes, { type: "textarea" });
-  if (kind === "complete") return expected + field("summary", "What was observed?", "", { required: true, type: "textarea" }) + field("reference", "Stable reference URI or SHA-256", "", { required: true }) + field("observed_at", "Observed at", toLocalDateTime(new Date()), { required: true, type: "datetime-local" });
-  if (kind === "snooze") return expected + field("until", "Snooze until", "", { required: true, type: "datetime-local" }) + field("reason", "Reason", "", { required: true });
+  if (kind === "check") return [
+    field("project_id", "Project", "", { required: true }),
+    field("task_id", "Task (optional)"),
+    selectField("lifecycle_event", "Lifecycle event", "checkpoint", ["task_start", "checkpoint", "continuation", "final_review"], { required: true }),
+    field("limit", "Maximum items", "25", { type: "number", min: 1 }),
+  ].join("");
+  if (kind === "update") return [
+    expected,
+    field("message", "Message", item?.message, { required: true }),
+    selectField("priority", "Priority", item?.priority || "normal", ["low", "normal", "high", "critical"], { required: true }),
+    field("instructions", "Instructions", item?.instructions, { type: "textarea" }),
+    field("reason", "Reason for change", "", { required: true }),
+  ].join("");
+  if (kind === "complete") return expected + field("summary", "What was observed?", "", { required: true, type: "textarea" }) + field("reference_uri", "Stable reference URI", "", { required: true }) + field("observed_at", "Observed at", toLocalDateTime(new Date()), { required: true, type: "datetime-local" });
+  if (kind === "snooze") return expected + field("snooze_until", "Snooze until", "", { required: true, type: "datetime-local" }) + field("reason", "Reason", "", { required: true });
   if (kind === "cancel") return expected + field("reason", "Reason for cancellation", "", { required: true, type: "textarea" });
   return expected;
 }
@@ -347,25 +369,26 @@ async function submitOperation(event) {
   let body;
   if (kind === "add") {
     path = "/remindi";
-    body = { title: values.title, project_id: values.project_id, task_id: values.task_id || null, priority: Number(values.priority), notes: values.notes || null, trigger: { type: "time", at: new Date(values.due_at).toISOString() } };
+    body = { message: values.message, project_id: values.project_id, task_id: values.task_id || null, priority: values.priority, instructions: values.instructions || null, trigger: { type: "at_time", at: new Date(values.due_at).toISOString() } };
   } else if (kind === "check") {
     path = "/remindi/check";
-    body = { limit: Number(values.limit) };
+    body = { project_id: values.project_id, task_id: values.task_id || null, lifecycle_event: values.lifecycle_event, limit: Number(values.limit) };
   } else if (kind === "update") {
     path = `/remindi/${encodeURIComponent(id)}`; method = "PATCH";
-    body = { expected_version: Number(values.expected_version), title: values.title, priority: Number(values.priority), notes: values.notes || null };
+    body = { expected_version: Number(values.expected_version), message: values.message, priority: values.priority, instructions: values.instructions || null, reason: values.reason };
   } else if (kind === "complete") {
     path = `/remindi/${encodeURIComponent(id)}/complete`;
-    body = { expected_version: Number(values.expected_version), evidence: { type: "manual_verification", summary: values.summary, observed_at: new Date(values.observed_at).toISOString(), references: [values.reference] } };
+    body = { expected_version: Number(values.expected_version), evidence: { type: "observation", summary: values.summary, reference_uri: values.reference_uri, observed_at: new Date(values.observed_at).toISOString() } };
   } else if (kind === "snooze") {
     path = `/remindi/${encodeURIComponent(id)}/snooze`;
-    body = { expected_version: Number(values.expected_version), until: new Date(values.until).toISOString(), reason: values.reason };
+    body = { expected_version: Number(values.expected_version), snooze_until: new Date(values.snooze_until).toISOString(), reason: values.reason };
   } else {
     path = `/remindi/${encodeURIComponent(id)}/cancel`;
     body = { expected_version: Number(values.expected_version), reason: values.reason };
   }
   try {
-    const result = await api(path, { method, body: mutationBody(body) });
+    const payload = kind === "check" ? JSON.stringify(body) : mutationBody(body);
+    const result = await api(path, { method, body: payload });
     closeOperation();
     announce(kind === "check" ? `${number.format(normaliseItems(result).length)} item(s) ready.` : `${operationTitle(kind)} succeeded.`);
     await load();
