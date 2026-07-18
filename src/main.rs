@@ -12,6 +12,7 @@ use remindi::{
     remindi::RemindiService,
     scheduler::{AdapterProvider, Scheduler, SchedulerConfig},
     triggers::adapters::AdapterRegistry,
+    webui::{AssetOverrides, WebUiAssets},
 };
 use secrecy::ExposeSecret;
 use tokio::net::TcpListener;
@@ -47,6 +48,27 @@ async fn main() -> anyhow::Result<()> {
         state.ids_shared(),
     ));
     let web_api = WebApiState::new(web_sessions, web_service);
+    let webui_assets = if state.bootstrap().webui_enabled() {
+        Some(Arc::new(
+            WebUiAssets::load(
+                state.bootstrap().webui_title(),
+                AssetOverrides {
+                    custom_css: state
+                        .bootstrap()
+                        .webui_custom_css_file()
+                        .map(ToOwned::to_owned),
+                    logo: state.bootstrap().webui_logo_file().map(ToOwned::to_owned),
+                    favicon: state
+                        .bootstrap()
+                        .webui_favicon_file()
+                        .map(ToOwned::to_owned),
+                },
+            )
+            .context("WebUI asset startup failed")?,
+        ))
+    } else {
+        None
+    };
     let scheduler_service = Arc::new(RemindiService::new(
         Arc::clone(&database),
         state.bootstrap().owner_id(),
@@ -79,7 +101,10 @@ async fn main() -> anyhow::Result<()> {
         let cancel = scheduler_cancel.clone();
         async move { scheduler.run(cancel).await }
     });
-    let state = state.with_mcp(Arc::clone(&mcp)).with_web_api(web_api);
+    let mut state = state.with_mcp(Arc::clone(&mcp)).with_web_api(web_api);
+    if let Some(assets) = webui_assets {
+        state = state.with_webui_assets(assets);
+    }
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind the fixed listener at {address}"))?;

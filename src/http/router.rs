@@ -1,6 +1,7 @@
 use axum::{
     Router,
     extract::Extension,
+    middleware as axum_middleware,
     response::IntoResponse,
     routing::{any, get},
 };
@@ -13,6 +14,7 @@ use crate::{
         api, health,
         middleware::{self, RequestId},
     },
+    webui,
 };
 
 /// Builds the always-on health and API error shell on the single listener.
@@ -39,6 +41,10 @@ pub fn build_router(state: AppState) -> Router {
             )
             .layer(RequestBodyLimitLayer::new(1024 * 1024));
         router = router.merge(mcp);
+    }
+    if let Some(assets) = state.webui_assets() {
+        let webui = webui::router(assets).layer(axum_middleware::from_fn(api::security_headers));
+        router = router.merge(webui);
     }
 
     middleware::apply(router, state)

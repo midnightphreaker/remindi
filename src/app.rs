@@ -15,6 +15,7 @@ use crate::{
     db::DatabaseManager,
     http::api::WebApiState,
     mcp::server::McpWorkload,
+    webui::WebUiAssets,
 };
 
 /// Shared state for the always-on control plane.
@@ -26,6 +27,7 @@ pub struct AppState {
     database: Option<Arc<DatabaseManager>>,
     mcp: Option<Arc<McpWorkload>>,
     web_api: Option<WebApiState>,
+    webui_assets: Option<Arc<WebUiAssets>>,
     ready: Arc<AtomicBool>,
 }
 
@@ -44,6 +46,7 @@ impl AppState {
             database: None,
             mcp: None,
             web_api: None,
+            webui_assets: None,
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -66,6 +69,13 @@ impl AppState {
     #[must_use]
     pub fn with_web_api(mut self, web_api: WebApiState) -> Self {
         self.web_api = Some(web_api);
+        self
+    }
+
+    /// Attaches immutable embedded/custom WebUI assets.
+    #[must_use]
+    pub fn with_webui_assets(mut self, assets: Arc<WebUiAssets>) -> Self {
+        self.webui_assets = Some(assets);
         self
     }
 
@@ -121,6 +131,12 @@ impl AppState {
     #[must_use]
     pub fn web_api(&self) -> Option<&WebApiState> {
         self.web_api.as_ref()
+    }
+
+    /// Returns immutable WebUI assets when the browser surface is enabled.
+    #[must_use]
+    pub fn webui_assets(&self) -> Option<Arc<WebUiAssets>> {
+        self.webui_assets.as_ref().map(Arc::clone)
     }
 
     /// Reports whether all currently implemented readiness checks pass.

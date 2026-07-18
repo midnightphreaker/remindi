@@ -5,7 +5,13 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use remindi::webui::{AssetOverrides, WebUiAssets, router};
+use remindi::{
+    app::AppState,
+    clock::{SystemClock, UuidV7Generator},
+    config::BootstrapConfig,
+    http::router::build_router,
+    webui::{AssetOverrides, WebUiAssets, router},
+};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -102,6 +108,34 @@ async fn title_is_escaped_and_unknown_asset_is_normal_404() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+}
+
+#[tokio::test]
+async fn primary_router_mounts_enabled_ui_with_browser_security_headers() {
+    let config = Arc::new(
+        BootstrapConfig::from_pairs([
+            ("REMINDI_OWNER_ID", "owner-a"),
+            ("REMINDI_MCP_TOKEN", "test-token"),
+            ("REMINDI_WEBUI_ENABLE", "true"),
+            ("REMINDI_WEBUI_AUTH", "false"),
+        ])
+        .unwrap(),
+    );
+    let state = AppState::new(config, Arc::new(SystemClock), Arc::new(UuidV7Generator))
+        .with_webui_assets(Arc::new(WebUiAssets::embedded("Remindi")));
+    let response = build_router(state)
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .is_some_and(|value| value.to_str().unwrap().contains("script-src 'self'"))
+    );
+    assert_eq!(response.headers()["x-frame-options"], "DENY");
     assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
 }
 
