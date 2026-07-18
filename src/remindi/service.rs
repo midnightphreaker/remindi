@@ -187,6 +187,8 @@ pub struct RemindiService {
     cursor_key: [u8; 32],
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
+    #[cfg(any(test, debug_assertions))]
+    check_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
 struct MutationCall<'a> {
@@ -225,7 +227,38 @@ impl RemindiService {
             cursor_key: hasher.finalize().into(),
             clock,
             ids,
+            #[cfg(any(test, debug_assertions))]
+            check_barrier: None,
         }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_check_barrier_for_testing(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+        self.check_barrier = Some(barrier);
+        self
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub async fn check_candidate_query_plan_for_testing(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+        include_scheduled: bool,
+    ) -> Result<Vec<String>, ServiceError> {
+        let mut connection = self.database.connection().await.map_err(map_database)?;
+        RemindiRepository::check_candidates_query_plan(
+            connection.as_mut(),
+            &self.owner_id,
+            project_id,
+            task_id,
+            self.clock.now(),
+            include_scheduled,
+        )
+        .await
+        .map_err(map_repository)
     }
 
     pub async fn add(
@@ -816,6 +849,10 @@ impl RemindiService {
         }
         let has_more = ready.len() > limit;
         ready.truncate(limit);
+        #[cfg(any(test, debug_assertions))]
+        if let Some(barrier) = self.check_barrier.as_ref() {
+            barrier.wait().await;
+        }
         let next_cursor = if has_more {
             ready
                 .last()

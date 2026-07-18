@@ -376,71 +376,45 @@ impl RemindiRepository {
         now: OffsetDateTime,
         include_scheduled: bool,
     ) -> Result<Vec<Remindi>, RepositoryError> {
-        let mut query =
-            QueryBuilder::<Sqlite>::new("SELECT r.* FROM remindi r WHERE r.owner_id = ");
-        query
-            .push_bind(owner_id)
-            .push(" AND r.project_id = ")
-            .push_bind(project_id);
-        if include_scheduled {
-            query.push(" AND r.state IN ('scheduled', 'due', 'overdue', 'snoozed')");
-            if let Some(task_id) = task_id {
-                query.push(" AND r.task_id = ").push_bind(task_id);
-            }
-        } else {
-            let now = timestamp(now)?;
-            query.push(" AND r.state IN ('due', 'overdue')");
-            if let Some(task_id) = task_id {
-                query.push(" AND r.task_id = ").push_bind(task_id);
-            }
-            query
-                .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
-                .push_bind(owner_id)
-                .push(" AND r.project_id = ")
-                .push_bind(project_id)
-                .push(" AND r.state = 'snoozed' AND r.snooze_until <= ")
-                .push_bind(&now)
-                .push(" ");
-            if let Some(task_id) = task_id {
-                query.push(" AND r.task_id = ").push_bind(task_id);
-            }
-            query
-                .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
-                .push_bind(owner_id)
-                .push(" AND r.project_id = ")
-                .push_bind(project_id)
-                .push(
-                    " AND r.state = 'scheduled'
-                      AND r.trigger_type IN ('at_time', 'after_elapsed', 'interval')
-                      AND r.next_fire_at <= ",
-                )
-                .push_bind(&now)
-                .push(" ");
-            if let Some(task_id) = task_id {
-                query.push(" AND r.task_id = ").push_bind(task_id);
-            }
-            query
-                .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
-                .push_bind(owner_id)
-                .push(" AND r.project_id = ")
-                .push_bind(project_id)
-                .push(
-                    " AND r.state = 'scheduled'
-                      AND r.trigger_type IN (
-                        'next_session', 'next_continuation', 'goal_active', 'condition'
-                      )",
-                );
-            if let Some(task_id) = task_id {
-                query.push(" AND r.task_id = ").push_bind(task_id);
-            }
-        }
-        query
-            .build()
-            .fetch_all(connection)
-            .await?
-            .iter()
-            .map(remindi_from_row)
-            .collect()
+        check_candidates_query(
+            "SELECT r.* FROM remindi r WHERE r.owner_id = ",
+            owner_id,
+            project_id,
+            task_id,
+            now,
+            include_scheduled,
+        )?
+        .build()
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(remindi_from_row)
+        .collect()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) async fn check_candidates_query_plan(
+        connection: &mut SqliteConnection,
+        owner_id: &str,
+        project_id: &str,
+        task_id: Option<&str>,
+        now: OffsetDateTime,
+        include_scheduled: bool,
+    ) -> Result<Vec<String>, RepositoryError> {
+        Ok(check_candidates_query(
+            "EXPLAIN QUERY PLAN SELECT r.* FROM remindi r WHERE r.owner_id = ",
+            owner_id,
+            project_id,
+            task_id,
+            now,
+            include_scheduled,
+        )?
+        .build()
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(|row| row.get("detail"))
+        .collect())
     }
 
     pub(crate) async fn scheduler_candidates(
@@ -654,6 +628,85 @@ fn trigger_name(trigger: &Trigger) -> &'static str {
         Trigger::GoalActive { .. } => "goal_active",
         Trigger::Condition { .. } => "condition",
     }
+}
+
+fn check_candidates_query(
+    initial: &'static str,
+    owner_id: &str,
+    project_id: &str,
+    task_id: Option<&str>,
+    now: OffsetDateTime,
+    include_scheduled: bool,
+) -> Result<QueryBuilder<Sqlite>, RepositoryError> {
+    let mut query = QueryBuilder::<Sqlite>::new(initial);
+    query
+        .push_bind(owner_id.to_owned())
+        .push(" AND r.project_id = ")
+        .push_bind(project_id.to_owned());
+    if include_scheduled {
+        query.push(" AND r.state IN ('scheduled', 'due', 'overdue', 'snoozed')");
+        if let Some(task_id) = task_id {
+            query
+                .push(" AND r.task_id = ")
+                .push_bind(task_id.to_owned());
+        }
+        return Ok(query);
+    }
+
+    let now = timestamp(now)?;
+    query.push(" AND r.state IN ('due', 'overdue')");
+    if let Some(task_id) = task_id {
+        query
+            .push(" AND r.task_id = ")
+            .push_bind(task_id.to_owned());
+    }
+    query
+        .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
+        .push_bind(owner_id.to_owned())
+        .push(" AND r.project_id = ")
+        .push_bind(project_id.to_owned())
+        .push(" AND r.state = 'snoozed' AND r.snooze_until <= ")
+        .push_bind(now.clone())
+        .push(" ");
+    if let Some(task_id) = task_id {
+        query
+            .push(" AND r.task_id = ")
+            .push_bind(task_id.to_owned());
+    }
+    query
+        .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
+        .push_bind(owner_id.to_owned())
+        .push(" AND r.project_id = ")
+        .push_bind(project_id.to_owned())
+        .push(
+            " AND r.state = 'scheduled'
+              AND r.trigger_type IN ('at_time', 'after_elapsed', 'interval')
+              AND r.next_fire_at <= ",
+        )
+        .push_bind(now)
+        .push(" ");
+    if let Some(task_id) = task_id {
+        query
+            .push(" AND r.task_id = ")
+            .push_bind(task_id.to_owned());
+    }
+    query
+        .push(" UNION ALL SELECT r.* FROM remindi r WHERE r.owner_id = ")
+        .push_bind(owner_id.to_owned())
+        .push(" AND r.project_id = ")
+        .push_bind(project_id.to_owned())
+        .push(
+            " AND r.state = 'scheduled'
+              AND r.trigger_type IN (
+                'next_session', 'next_continuation', 'goal_active', 'condition'
+              )",
+        );
+    if let Some(task_id) = task_id {
+        query
+            .push(" AND r.task_id = ")
+            .push_bind(task_id.to_owned());
+    }
+    Ok(query)
 }
 
 fn timestamp(value: OffsetDateTime) -> Result<String, RepositoryError> {
