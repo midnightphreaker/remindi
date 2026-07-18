@@ -204,6 +204,40 @@ async fn reconciliation_rebuilds_only_verified_database_manifest_pairs_after_res
 }
 
 #[tokio::test]
+async fn reconciliation_rejects_a_manifest_that_is_not_the_database_sidecar() {
+    let (database, manager, root) = manager("reconcile-sidecar").await;
+    let record = manager
+        .create(BackupSource::Manual, &actor())
+        .await
+        .expect("manual backup");
+    let database_path = root.join("backups").join(&record.file_name);
+    let sidecar = database_path.with_extension("sqlite3.json");
+    fs::copy(&sidecar, root.join("backups/forged.json")).expect("copy manifest");
+    fs::remove_file(sidecar).expect("remove matching sidecar");
+    {
+        let mut connection = database.connection().await.expect("connection");
+        sqlx::query("DELETE FROM backup_records WHERE id = ?")
+            .bind(&record.id)
+            .execute(connection.as_mut())
+            .await
+            .expect("remove inventory row");
+    }
+    drop(manager);
+
+    let restarted = BackupManager::open(
+        Arc::clone(&database),
+        root.join("backups"),
+        "owner",
+        Arc::new(FixedClock::new(datetime!(2026-07-19 00:01 UTC))),
+        Arc::new(UuidV7Generator),
+    )
+    .await
+    .expect("restart");
+
+    assert!(restarted.list().await.expect("inventory").is_empty());
+}
+
+#[tokio::test]
 async fn retention_expires_only_eligible_automatic_or_uploaded_backups() {
     let (database, manager, _root) = manager("retention").await;
     {

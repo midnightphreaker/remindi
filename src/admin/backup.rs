@@ -295,6 +295,9 @@ impl BackupManager {
                 Err(_) => continue,
             };
             let database_path = self.directory.join(&manifest.file_name);
+            if path != manifest_path(&database_path) {
+                continue;
+            }
             let verified = match self.verify_database(&database_path).await {
                 Ok(verified) => verified,
                 Err(_) => continue,
