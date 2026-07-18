@@ -29,6 +29,7 @@ username/password are deliberately separate.
 - [MCP tool reference](#mcp-tool-reference)
 - [Agent pull workflow](#agent-pull-workflow)
 - [WebUI and administration API](#webui-and-administration-api)
+- [Customization](#customization)
 - [Configuration](#configuration)
 - [Condition adapters](#condition-adapters)
 - [Deployment](#deployment)
@@ -1044,6 +1045,20 @@ immutable snapshot after a successful optimistic update:
 The WebUI is the easiest supported way to make these changes because it
 handles sessions, CSRF, current versions, and validation errors.
 
+## Customization
+
+Remindi can change the WebUI page title and load operator-supplied CSS, logo,
+and favicon files through environment variables. The repository includes
+editable copies of all three file-backed defaults.
+
+See the [Remindi customization guide](customization/README.md) for:
+
+- the `REMINDI_WEBUI_TITLE` page-title setting;
+- the CSS, logo, and favicon environment variables;
+- Docker Compose bind mounts and native absolute-path examples;
+- supported formats, size limits, permissions, and startup behavior; and
+- reset and upgrade instructions.
+
 ## Configuration
 
 Bootstrap configuration is read once from the environment. Identity,
@@ -1098,6 +1113,10 @@ The supplied Compose file forwards all 18 application variables.
 Custom asset paths are read once at startup, must be absolute, and must not be
 world-writable. In a container, mount each file and use its absolute container
 path.
+
+Editable copies of the default assets, Docker Compose and native examples, and
+page-title instructions are in the
+[`customization/` guide](customization/README.md).
 
 | Asset | Maximum size | Accepted content |
 |---|---:|---|
