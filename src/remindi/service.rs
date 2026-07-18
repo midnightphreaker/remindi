@@ -777,29 +777,49 @@ impl RemindiService {
         };
         let mut ready = Vec::new();
         for candidate in candidates {
-            if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await? {
-                ready.push(item);
+            let mut preview = candidate.clone();
+            let result = evaluate(
+                &mut preview,
+                now,
+                &context,
+                ConditionEvaluation::NotEvaluated,
+            )
+            .map_err(map_domain)?;
+            if let Some(readiness) = result.readiness {
+                ready.push((
+                    candidate,
+                    CheckedItem {
+                        remindi: preview,
+                        readiness,
+                    },
+                ));
             }
         }
-        ready.sort_by(check_order);
+        ready.sort_by(|left, right| check_order(&left.1, &right.1));
         if let Some(cursor) = cursor.as_ref() {
-            ready.retain(|item| check_after_cursor(item, cursor));
+            ready.retain(|item| check_after_cursor(&item.1, cursor));
         }
         let has_more = ready.len() > limit;
         ready.truncate(limit);
         let next_cursor = if has_more {
             ready
                 .last()
-                .map(check_cursor)
+                .map(|item| check_cursor(&item.1))
                 .transpose()?
                 .map(|cursor| self.encode_cursor("check", &cursor))
                 .transpose()?
         } else {
             None
         };
+        let mut items = Vec::with_capacity(ready.len());
+        for (candidate, _) in ready {
+            if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await? {
+                items.push(item);
+            }
+        }
         Ok(CheckResult {
             checked_at: now,
-            items: ready,
+            items,
             next_cursor,
         })
     }
