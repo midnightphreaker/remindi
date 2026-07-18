@@ -1,5 +1,6 @@
 //! Remindi's production process shell and shared application boundaries.
 
+pub mod admin;
 pub mod app;
 pub mod auth;
 pub mod clock;
@@ -11,3 +12,6 @@ pub mod mcp;
 pub mod remindi;
 pub mod scheduler;
 pub mod triggers;
+
+#[path = "http/api/admin.rs"]
+pub mod admin_http_api;
