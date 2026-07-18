@@ -368,6 +368,32 @@ impl RemindiRepository {
             .collect()
     }
 
+    pub(crate) async fn check_candidates(
+        connection: &mut SqliteConnection,
+        owner_id: &str,
+        project_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Vec<Remindi>, RepositoryError> {
+        let mut query =
+            QueryBuilder::<Sqlite>::new("SELECT r.* FROM remindi r WHERE r.owner_id = ");
+        query
+            .push_bind(owner_id)
+            .push(" AND r.project_id = ")
+            .push_bind(project_id)
+            .push(" AND r.state IN ('scheduled', 'due', 'overdue', 'snoozed')");
+        if let Some(task_id) = task_id {
+            query.push(" AND r.task_id = ").push_bind(task_id);
+        }
+        query
+            .push(" ORDER BY r.id ASC")
+            .build()
+            .fetch_all(connection)
+            .await?
+            .iter()
+            .map(remindi_from_row)
+            .collect()
+    }
+
     pub(crate) async fn history(
         connection: &mut SqliteConnection,
         filter: HistoryFilter<'_>,

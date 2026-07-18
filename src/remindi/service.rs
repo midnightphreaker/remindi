@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 use crate::{
@@ -239,6 +239,10 @@ impl RemindiService {
         request.instructions = optional_bounded(request.instructions, 32_768)?;
         request.session_id = optional_context(request.session_id, 512)?;
         request.task_lineage_id = optional_context(request.task_lineage_id, 512)?;
+        normalize_trigger(&mut request.trigger)?;
+        if let Some(recurrence) = request.recurrence.as_mut() {
+            normalize_recurrence(recurrence)?;
+        }
         request.trigger.validate().map_err(map_domain)?;
         if let Some(recurrence) = request.recurrence.as_ref() {
             recurrence
@@ -347,12 +351,13 @@ impl RemindiService {
     pub async fn complete(
         &self,
         actor: &Actor,
-        request: CompleteRequest,
+        mut request: CompleteRequest,
         maximum_future_skew: StdDuration,
     ) -> Result<MutationResult, ServiceError> {
         validate_actor(actor)?;
         validate_idempotency_key(&request.idempotency_key)?;
         validate_expected_version(request.expected_version)?;
+        request.completion_note = optional_bounded(request.completion_note, 4096)?;
         let request_hash = request_hash(&request)?;
         let now = self.clock.now();
         let evidence = request
@@ -385,12 +390,14 @@ impl RemindiService {
     pub async fn snooze(
         &self,
         actor: &Actor,
-        request: SnoozeRequest,
+        mut request: SnoozeRequest,
         maximum_horizon: StdDuration,
     ) -> Result<MutationResult, ServiceError> {
         validate_actor(actor)?;
         validate_idempotency_key(&request.idempotency_key)?;
         validate_expected_version(request.expected_version)?;
+        request.reason = required_text(request.reason, 4096)?;
+        request.snooze_until = normalize_instant(request.snooze_until)?;
         let request_hash = request_hash(&request)?;
         let now = self.clock.now();
         let maximum = Duration::try_from(maximum_horizon).map_err(|_| ServiceError::Validation)?;
@@ -428,11 +435,12 @@ impl RemindiService {
     pub async fn cancel(
         &self,
         actor: &Actor,
-        request: CancelRequest,
+        mut request: CancelRequest,
     ) -> Result<MutationResult, ServiceError> {
         validate_actor(actor)?;
         validate_idempotency_key(&request.idempotency_key)?;
         validate_expected_version(request.expected_version)?;
+        request.reason = required_text(request.reason, 4096)?;
         let request_hash = request_hash(&request)?;
         let now = self.clock.now();
         self.mutate(
@@ -465,7 +473,8 @@ impl RemindiService {
         validate_actor(actor)?;
         validate_idempotency_key(&request.idempotency_key)?;
         validate_expected_version(request.expected_version)?;
-        if request.reason.trim().is_empty() || !has_update(&request) {
+        request.reason = required_text(request.reason, 4096)?;
+        if !has_update(&request) {
             return Err(ServiceError::Validation);
         }
         if let Some(message) = request.message.take() {
@@ -476,6 +485,12 @@ impl RemindiService {
         }
         if let Some(trigger) = request.trigger.as_ref() {
             trigger.validate().map_err(map_domain)?;
+        }
+        if let Some(trigger) = request.trigger.as_mut() {
+            normalize_trigger(trigger)?;
+        }
+        if let Some(Some(recurrence)) = request.recurrence.as_mut() {
+            normalize_recurrence(recurrence)?;
         }
         if request
             .overdue_after_seconds
@@ -507,30 +522,48 @@ impl RemindiService {
                 if item.state.is_terminal() {
                     return Err(ServiceError::InvalidState);
                 }
+                if request.occurrence_disposition.is_some()
+                    && !matches!(item.state, RemindiState::Due | RemindiState::Overdue)
+                {
+                    return Err(ServiceError::InvalidState);
+                }
                 let prior_version = item.version;
+                let prior_trigger = trigger_summary(item);
+                let prior_occurrence_no = item.occurrence_no;
+                let prior_schedule = item.next_fire_at;
+                let mut changed_fields = Vec::new();
+                let mut skipped_count = None;
                 if let Some(message) = request.message {
                     item.message = message;
+                    changed_fields.push("message");
                 }
                 if let Some(instructions) = request.instructions {
                     item.instructions = instructions;
+                    changed_fields.push("instructions");
                 }
                 if let Some(priority) = request.priority {
                     item.priority = priority;
+                    changed_fields.push("priority");
                 }
                 if let Some(seconds) = request.overdue_after_seconds {
                     item.overdue_after_seconds = seconds;
+                    changed_fields.push("overdue_after_seconds");
                 }
                 if let Some(trigger) = request.trigger {
                     let next = initial_next_fire_at(&trigger, now)?;
+                    let next_evaluation = initial_next_evaluation_at(&trigger, now);
                     item.replace_trigger(trigger, next, now)
                         .map_err(map_domain)?;
+                    item.next_evaluation_at = next_evaluation;
+                    changed_fields.push("trigger");
                 }
                 if let Some(recurrence) = request.recurrence {
-                    if let Some(spec) = recurrence.as_ref() {
-                        spec.validate_for_trigger(&item.trigger)
-                            .map_err(map_domain)?;
-                    }
                     item.recurrence = recurrence;
+                    changed_fields.push("recurrence");
+                }
+                if let Some(spec) = item.recurrence.as_ref() {
+                    spec.validate_for_trigger(&item.trigger)
+                        .map_err(map_domain)?;
                 }
                 if let Some(disposition) = request.occurrence_disposition {
                     let recurrence = item.recurrence.as_ref().ok_or(ServiceError::InvalidState)?;
@@ -543,6 +576,8 @@ impl RemindiService {
                     item.occurrence_no = advance.occurrence_no;
                     item.due_since = None;
                     item.state = RemindiState::Scheduled;
+                    skipped_count = Some(advance.skipped_count);
+                    changed_fields.push("occurrence_disposition");
                 }
                 if item.version == prior_version {
                     item.version += 1;
@@ -558,14 +593,32 @@ impl RemindiService {
                         })
                         .collect::<Vec<_>>();
                     validate_goal_link(&item.trigger, &inputs)?;
+                    changed_fields.push("links");
                 }
+                let details = if request.occurrence_disposition.is_some() {
+                    json!({
+                        "reason": request.reason,
+                        "previous_occurrence_no": prior_occurrence_no,
+                        "next_occurrence_no": item.occurrence_no,
+                        "previous_schedule": prior_schedule,
+                        "next_schedule": item.next_fire_at,
+                        "skipped_count": skipped_count.unwrap_or(0),
+                    })
+                } else {
+                    json!({
+                        "reason": request.reason,
+                        "changed_fields": changed_fields,
+                        "before_trigger": prior_trigger,
+                        "after_trigger": trigger_summary(item),
+                    })
+                };
                 Ok((
                     if request.occurrence_disposition.is_some() {
                         EventType::OccurrenceAdvanced
                     } else {
                         EventType::Updated
                     },
-                    json!({"reason": request.reason}),
+                    details,
                     None,
                     replacement_links,
                 ))
@@ -699,24 +752,22 @@ impl RemindiService {
         request.task_id = optional_text(request.task_id, 512)?;
         request.session_id = optional_context(request.session_id, 512)?;
         request.task_lineage_id = optional_context(request.task_lineage_id, 512)?;
-        let listed = self
-            .list(
-                actor,
-                ListRequest {
-                    project_id: Some(request.project_id),
-                    task_id: request.task_id,
-                    states: vec![
-                        RemindiState::Scheduled,
-                        RemindiState::Due,
-                        RemindiState::Overdue,
-                        RemindiState::Snoozed,
-                    ],
-                    limit: request.limit,
-                    cursor: request.cursor,
-                    ..ListRequest::default()
-                },
-            )
-            .await?;
+        let limit = page_limit(request.limit, 50)?;
+        let cursor = request
+            .cursor
+            .as_deref()
+            .map(|value| self.decode_cursor::<CheckCursor>(value, "check"))
+            .transpose()?;
+        let mut connection = self.database.connection().await.map_err(map_database)?;
+        let candidates = RemindiRepository::check_candidates(
+            connection.as_mut(),
+            &self.owner_id,
+            &request.project_id,
+            request.task_id.as_deref(),
+        )
+        .await
+        .map_err(map_repository)?;
+        drop(connection);
         let now = self.clock.now();
         let context = CheckContext {
             session_id: request.session_id,
@@ -725,16 +776,31 @@ impl RemindiService {
             active_goal_ids: request.active_goal_ids,
         };
         let mut ready = Vec::new();
-        for candidate in listed.items {
+        for candidate in candidates {
             if let Some(item) = self.evaluate_one(actor, candidate, now, &context).await? {
                 ready.push(item);
             }
         }
         ready.sort_by(check_order);
+        if let Some(cursor) = cursor.as_ref() {
+            ready.retain(|item| check_after_cursor(item, cursor));
+        }
+        let has_more = ready.len() > limit;
+        ready.truncate(limit);
+        let next_cursor = if has_more {
+            ready
+                .last()
+                .map(check_cursor)
+                .transpose()?
+                .map(|cursor| self.encode_cursor("check", &cursor))
+                .transpose()?
+        } else {
+            None
+        };
         Ok(CheckResult {
             checked_at: now,
             items: ready,
-            next_cursor: listed.next_cursor,
+            next_cursor,
         })
     }
 
@@ -853,7 +919,7 @@ impl RemindiService {
             });
         }
         let prior_version = item.version;
-        let (event_type, details, evidence, replacement_links) = operation(&mut item)?;
+        let (event_type, mut details, evidence, replacement_links) = operation(&mut item)?;
         if !RemindiRepository::update_cas(transaction.as_mut(), &item, prior_version)
             .await
             .map_err(map_repository)?
@@ -884,6 +950,13 @@ impl RemindiService {
                 recorded_by: call.actor.actor_id.clone(),
                 metadata: evidence.metadata().cloned(),
             };
+            details
+                .as_object_mut()
+                .ok_or(ServiceError::Internal)?
+                .insert(
+                    "evidence_id".to_owned(),
+                    Value::String(evidence_record.id.to_string()),
+                );
             RemindiRepository::insert_evidence(transaction.as_mut(), &evidence_record)
                 .await
                 .map_err(map_repository)?;
@@ -1020,6 +1093,14 @@ struct HistoryCursor {
     sequence: i64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct CheckCursor {
+    readiness: u8,
+    priority: u8,
+    next_fire_at: Option<String>,
+    id: String,
+}
+
 async fn replay(
     connection: &mut sqlx::SqliteConnection,
     actor: &Actor,
@@ -1110,6 +1191,39 @@ fn initial_next_evaluation_at(trigger: &Trigger, now: OffsetDateTime) -> Option<
     }
 }
 
+fn normalize_instant(value: OffsetDateTime) -> Result<OffsetDateTime, ServiceError> {
+    value
+        .to_offset(UtcOffset::UTC)
+        .replace_nanosecond((value.nanosecond() / 1_000_000) * 1_000_000)
+        .map_err(|_| ServiceError::Validation)
+}
+
+fn normalize_trigger(trigger: &mut Trigger) -> Result<(), ServiceError> {
+    match trigger {
+        Trigger::AtTime { at } => *at = normalize_instant(*at)?,
+        Trigger::Interval { first_at, .. } => *first_at = normalize_instant(*first_at)?,
+        Trigger::Condition {
+            manual_check_at, ..
+        } => {
+            if let Some(value) = manual_check_at.as_mut() {
+                *value = normalize_instant(*value)?;
+            }
+        }
+        Trigger::AfterElapsed { .. }
+        | Trigger::NextSession
+        | Trigger::NextContinuation
+        | Trigger::GoalActive { .. } => {}
+    }
+    Ok(())
+}
+
+fn normalize_recurrence(recurrence: &mut RecurrenceSpec) -> Result<(), ServiceError> {
+    if let Some(value) = recurrence.end_at.as_mut() {
+        *value = normalize_instant(*value)?;
+    }
+    Ok(())
+}
+
 fn trigger_type(trigger: &Trigger) -> &'static str {
     match trigger {
         Trigger::AtTime { .. } => "at_time",
@@ -1120,6 +1234,14 @@ fn trigger_type(trigger: &Trigger) -> &'static str {
         Trigger::GoalActive { .. } => "goal_active",
         Trigger::Condition { .. } => "condition",
     }
+}
+
+fn trigger_summary(item: &Remindi) -> Value {
+    json!({
+        "type": trigger_type(&item.trigger),
+        "next_fire_at": item.next_fire_at,
+        "next_evaluation_at": item.next_evaluation_at,
+    })
 }
 
 fn validate_actor(actor: &Actor) -> Result<(), ServiceError> {
@@ -1325,6 +1447,40 @@ fn check_order(left: &CheckedItem, right: &CheckedItem) -> std::cmp::Ordering {
             },
         )
         .then_with(|| left.remindi.id.cmp(&right.remindi.id))
+}
+
+fn check_cursor(item: &CheckedItem) -> Result<CheckCursor, ServiceError> {
+    Ok(CheckCursor {
+        readiness: readiness_rank(item.readiness),
+        priority: priority_rank(item.remindi.priority),
+        next_fire_at: item
+            .remindi
+            .next_fire_at
+            .map(super::canonical_timestamp)
+            .transpose()
+            .map_err(map_domain)?,
+        id: item.remindi.id.to_string(),
+    })
+}
+
+fn check_after_cursor(item: &CheckedItem, cursor: &CheckCursor) -> bool {
+    let next_fire_at = item
+        .remindi
+        .next_fire_at
+        .and_then(|value| super::canonical_timestamp(value).ok());
+    (
+        readiness_rank(item.readiness),
+        std::cmp::Reverse(priority_rank(item.remindi.priority)),
+        next_fire_at.is_none(),
+        next_fire_at.unwrap_or_default(),
+        item.remindi.id.to_string(),
+    ) > (
+        cursor.readiness,
+        std::cmp::Reverse(cursor.priority),
+        cursor.next_fire_at.is_none(),
+        cursor.next_fire_at.clone().unwrap_or_default(),
+        cursor.id.clone(),
+    )
 }
 
 const fn readiness_rank(readiness: Readiness) -> u8 {

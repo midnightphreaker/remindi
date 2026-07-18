@@ -157,10 +157,29 @@ fn evaluate_snooze(
     }
 
     remindi.clear_snooze();
-    remindi.state = RemindiState::Due;
+    let grace = i64::try_from(remindi.overdue_after_seconds).unwrap_or(i64::MAX);
+    let overdue = remindi
+        .due_since
+        .is_some_and(|due_since| now >= due_since + Duration::seconds(grace));
+    remindi.state = if overdue {
+        RemindiState::Overdue
+    } else {
+        RemindiState::Due
+    };
     remindi.updated_at = now;
     remindi.version += 1;
-    evaluate_due(remindi, now, vec![EventType::BecameDue])
+    Ok(ready(
+        if overdue {
+            Readiness::Overdue
+        } else {
+            Readiness::Due
+        },
+        vec![if overdue {
+            EventType::BecameOverdue
+        } else {
+            EventType::BecameDue
+        }],
+    ))
 }
 
 fn evaluate_due(
