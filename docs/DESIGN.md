@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Document status | Draft for implementation |
-| Version | 1.1.0 |
+| Document status | Draft for timestamp wire-format correction |
+| Version | 1.2.0 |
 | Author | Shane Burger |
 | Date | 2026-07-18 |
-| Last updated | 2026-07-18 |
-| Governing specification | `SPEC.md` version 1.2.0 |
+| Last updated | 2026-07-19 |
+| Governing specification | `SPEC.md` version 1.3.0 |
 
 ## 1. Purpose
 
@@ -40,6 +40,7 @@ The design is intentionally a modular monolith:
 | Schemas | Serde and Schemars |
 | Observability | `tracing` with structured JSON output |
 | MCP transport | Streamable HTTP only |
+| MCP timestamps | Typed response views emit canonical UTC RFC 3339 strings with millisecond precision |
 | Deployment | One Docker container per user |
 | Tenancy | One owner configured by `REMINDI_OWNER_ID` |
 | MCP authentication | Required dedicated bearer token |
@@ -391,11 +392,23 @@ the configured owner even when selecting by globally unique `remindi_id`.
 
 - Domain logic uses UTC instants.
 - Persistence uses canonical RFC 3339 UTC strings with millisecond precision.
+- MCP response views convert domain instants to canonical UTC RFC 3339 strings
+  with exactly three fractional-second digits.
 - `next_fire_at` schedules time and interval occurrences.
 - `next_evaluation_at` schedules condition-adapter polling.
 - `snooze_until` suppresses an already-ready occurrence.
 - `due_since` is preserved through snooze.
 - All comparisons use the injected `Clock`.
+
+Domain types continue using `time::OffsetDateTime`. SQLite mapping continues
+using `canonical_timestamp` and `parse_timestamp`. The timestamp correction
+does not change database columns, domain arithmetic, request parsing, cursor
+encoding, idempotency request hashing, or stored idempotency responses.
+
+MCP output uses a separate presentation boundary because domain serialization
+also supports internal persistence and replay. Changing Serde behavior on
+`Remindi`, request types, or persisted response types would couple a wire-format
+fix to request hashes and historical idempotency records.
 
 ### 9.3 Snooze
 
@@ -468,6 +481,102 @@ The `rmcp` server registers exactly eight tools:
 | `remindi_list` | List items without evaluating triggers or changing state. |
 | `remindi_cancel` | Cancel one active item with a reason. |
 | `remindi_history` | Return ordered events and completion evidence for one item. |
+
+### 11.1 Canonical timestamp response boundary
+
+The MCP layer owns its wire representation. It does not serialize
+`Remindi`, `RemindiEvent`, or `CompletionEvidence` directly.
+
+Add `src/mcp/views.rs` with these presentation types:
+
+| Type | Purpose |
+|---|---|
+| `CanonicalTimestamp` | Private string newtype created fallibly from `OffsetDateTime`; serializes as a JSON string and exposes `format: date-time` through Schemars |
+| `RemindiView` | Agent-safe item projection for `remindi_list`, including typed trigger and recurrence views |
+| `TriggerView` | Preserves all trigger variants while formatting `at`, `first_at`, and `manual_check_at` canonically |
+| `RecurrenceView` | Preserves recurrence fields while formatting `end_at` canonically |
+| `EventView` | History-event projection with canonical `occurred_at` and normalized server-owned timestamp details |
+| `CompletionEvidenceView` | Evidence projection with canonical `observed_at` and `recorded_at` |
+
+Conversions consume the domain value when the handler no longer needs it. This
+moves owned strings and JSON values instead of cloning whole Remindi items.
+Every conversion is fallible and returns the existing handler serialization
+error when timestamp formatting fails.
+
+`CanonicalTimestamp::try_from` delegates to the existing
+`canonical_timestamp` function. It therefore emits exactly:
+
+```text
+YYYY-MM-DDTHH:MM:SS.sssZ
+```
+
+The response path is:
+
+```text
+OffsetDateTime domain value
+          |
+          v
+TryFrom domain model -> typed MCP view -> SuccessResponse<T>
+          |                                      |
+          +---- formatting failure --------------+--> INTERNAL_ERROR
+                                                 |
+                                                 v
+                         one serde_json::Value for structured content
+                                                 |
+                                                 v
+                                  identical text JSON fallback
+```
+
+`remindi_check` keeps its current explicit canonical conversion.
+`remindi_list` replaces `serde_json::to_value(item)` and `safe_item` with
+`RemindiView::try_from(item)`. `remindi_history` converts events and completion
+evidence before calling `structured`. The registered output schemas use these
+typed views instead of unconstrained `Value` parameters.
+
+The view types include only fields already returned by the corresponding tool.
+They must not broaden the response or expose `owner_id`. Optional fields retain
+their current presence and `null` behavior.
+
+### 11.2 Historical event-detail compatibility
+
+Some existing `remindi_events.details_json` rows contain default
+`OffsetDateTime` component arrays. New event details format timestamp values
+with `canonical_timestamp` before constructing JSON. `EventView` also
+normalizes the known historical server-owned fields:
+
+- `prior_next_fire_at`;
+- `snooze_until`;
+- `next_fire_at`;
+- `next_evaluation_at`.
+
+For one of these keys, the compatibility converter accepts either an already
+formatted RFC 3339 string, `null`, or the legacy component array accepted by
+the pinned `time` crate. It returns the canonical string or a serialization
+error. It never mutates the stored row.
+
+The converter does not walk or reinterpret condition `parameters`, evidence
+`metadata`, links, or other caller-supplied opaque JSON. This prevents a
+timestamp-looking caller value from changing meaning during a read.
+
+### 11.3 Compatibility and release behavior
+
+This correction changes only defective MCP output values from component arrays
+to the string representation already used by timestamp inputs and
+`remindi_check.checked_at`.
+
+- No SQLite migration runs.
+- No persisted row is rewritten.
+- No request DTO or request hash changes.
+- Existing cursors remain valid.
+- Existing idempotency records remain replayable.
+- MCP clients that parse documented timestamp strings become consistent across
+  tools.
+- A client that depends on the undocumented component arrays must update.
+
+The correction ships in the next patch release. Rollback redeploys the prior
+image; the database remains compatible in both directions.
+
+### 11.4 Tool registration and behavior
 
 Register these identifiers exactly as written. Schema, storage, or prose naming
 changes must not rewrite an actual MCP tool-call name.
@@ -1014,7 +1123,28 @@ Clock, UUID generation, filesystem roots, network resolution, HTTP client, and
 adapter results have injectable test implementations. Tests never depend on wall
 clock sleeps for Remindi timing semantics.
 
-### 23.3 Browser verification
+Timestamp wire-format tests use fixed `OffsetDateTime` values with UTC and
+non-UTC offsets. They assert exact fixed-millisecond output rather than
+snapshotting unstable wall-clock values.
+
+### 23.3 Timestamp contract verification
+
+The timestamp correction requires these focused checks:
+
+- a unit test for required and optional `CanonicalTimestamp` conversion;
+- typed-view tests for every timestamp-bearing trigger, recurrence, item,
+  event, and evidence field;
+- a legacy event-detail test that converts component arrays without changing
+  opaque metadata;
+- MCP handler tests that recursively reject arrays, objects, and numbers at
+  every server-owned timestamp location;
+- output-schema tests that require JSON string plus `format: date-time`;
+- a real Streamable HTTP test that compares structured content with the text
+  JSON fallback; and
+- the complete existing contract, database, WebUI, scheduler, and Docker
+  regression suites.
+
+### 23.4 Browser verification
 
 Run the built container and verify in a real browser:
 
@@ -1082,6 +1212,18 @@ application.
   restore acceptance scenarios.
 - Reconcile implementation and documentation before release.
 
+### Phase 9 — MCP timestamp wire-format correction
+
+- Add failing contract tests that reproduce tuple-array timestamps from
+  `remindi_list` and `remindi_history`.
+- Add typed MCP views and canonical timestamp conversion without changing
+  domain or persistence serialization.
+- Normalize new and historical server-owned event-detail timestamps.
+- Publish precise output schemas for list and history timestamp fields.
+- Run focused, full, and real-transport verification.
+- Build and canary the patch image, verify live MCP responses, then promote or
+  roll back to the prior image.
+
 No phase may treat its output as accepted until its targeted checks pass.
 
 ## 25. Requirement Traceability
@@ -1092,6 +1234,7 @@ No phase may treat its output as accepted until its targeted checks pass.
 | Remindi lifecycle and triggers | 9, 12 |
 | SQLite and concurrency | 6, 10 |
 | Eight MCP tools | 7, 8, 11 |
+| Canonical MCP timestamp wire format | 9.2, 11.1–11.3, 23.2–23.3, 24 |
 | Four adapters | 12–13 |
 | Scheduler | 12, 17 |
 | WebUI and authentication | 7–8, 14–15 |

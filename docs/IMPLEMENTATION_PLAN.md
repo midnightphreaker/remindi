@@ -1,7 +1,19 @@
 # Remindi Version 1 Implementation Plan
 
 **Goal:** Implement and verify the version 1 Remindi service defined by
-`SPEC.md` and structured by `DESIGN.md`.
+`SPEC.md` and structured by `DESIGN.md`, including the bounded MCP timestamp
+wire-format correction in Phase 9.
+
+**Plan revision:** 1.1.0, updated 2026-07-19.
+
+**Governing documents:** `SPEC.md` version 1.3.0 and `DESIGN.md` version 1.2.0.
+
+**Timestamp workstream state:** `READY` for implementation after owner review.
+This documentation task does not authorize a production deployment.
+
+**Timestamp workstream risk:** Medium. The change is local and requires no
+database migration, but it corrects an externally visible MCP response shape on
+the production service.
 
 **Architecture:** One Rust binary and one container serve the Axum control
 plane, rmcp Streamable HTTP endpoint, embedded WebUI, JSON API, scheduler, and
@@ -766,7 +778,236 @@ The release gate passes only when:
 - the final diff contains no source conflict, secret, unrelated cleanup, or
   version 2 feature.
 
-## 10. Requirement traceability
+## 10. Phase 9 — MCP timestamp wire-format correction
+
+Phase 9 corrects the confirmed agent-facing timestamp defect without changing
+time semantics or persistence. It is a corrective workstream after the version
+1 baseline, not a new trigger, scheduler, or WebUI feature.
+
+### 10.1 Scope and entry evidence
+
+**Outcome:** Every server-owned timestamp returned by MCP is a canonical UTC
+RFC 3339 string with exactly three fractional-second digits.
+
+**In scope:**
+
+- `remindi_check.checked_at`;
+- all server-owned timestamp fields returned by `remindi_list`;
+- event, evidence, and server-owned detail timestamps returned by
+  `remindi_history`;
+- typed MCP output schemas and text JSON fallback;
+- read-time normalization of legacy server-owned event-detail arrays;
+- focused, regression, real-transport, and deployment verification.
+
+**Out of scope:**
+
+- SQLite schema or data migration;
+- domain time arithmetic or recurrence behavior;
+- request timestamp syntax or validation;
+- cursor encoding and request hashing;
+- WebUI date localization or relative-time presentation;
+- rewriting caller-supplied condition parameters or evidence metadata;
+- new dependencies, APIs, tools, settings, or timestamp formats.
+
+**Current evidence:**
+
+- live `remindi_list` returns `created_at`, `updated_at`, and terminal
+  timestamps as component arrays when present;
+- live `remindi_history` returns `occurred_at` as a component array;
+- `remindi_check.checked_at` already returns a string;
+- `src/mcp/tools/list.rs` serializes the domain item directly through
+  `serde_json::to_value`;
+- `src/mcp/tools/history.rs` serializes domain events and evidence directly;
+- `src/remindi/model.rs` uses `OffsetDateTime` for domain fields;
+- `src/remindi/model.rs::canonical_timestamp` already supplies the required
+  fixed-millisecond UTC representation.
+
+**Entry gate:** Reproduce at least one list-array and one history-array result
+in a focused test before changing serialization.
+
+### Task 17: Lock the failing MCP timestamp contract
+
+**Source:** `SPEC.md` Sections 6.6, 14.11.1, 23.3, and 27.1; `DESIGN.md`
+Sections 9.2, 11.1–11.3, and 23.3.
+
+**Files:**
+
+- Modify: `tests/contract/mcp_tools.rs`
+- Modify: `tests/contract/mcp_schemas.rs`
+- Modify: `tests/contract/mcp_transport.rs`
+- Modify: `tests/database/phase2_regressions.rs`
+
+**Steps:**
+
+- [ ] Add a fixed-clock `remindi_list` case containing every applicable direct,
+      trigger, recurrence, optional, and terminal timestamp field.
+- [ ] Assert exact values such as `2026-07-19T06:00:00.000Z`; do not accept
+      variable fractional precision.
+- [ ] Add a `remindi_history` case covering `occurred_at`, completion
+      `observed_at`, completion `recorded_at`, and the known timestamp-bearing
+      event-detail fields.
+- [ ] Seed one historical event detail using the legacy component-array form.
+- [ ] Add a recursive assertion that rejects arrays, objects, integers, and
+      floating-point values at every server-owned timestamp location.
+- [ ] Prove caller-supplied condition `parameters` and evidence `metadata`
+      remain structurally identical JSON values.
+- [ ] Require list and history output schemas to describe timestamp fields as
+      strings with `format: date-time`.
+- [ ] Through real Streamable HTTP, parse the text content and compare every
+      timestamp value with `structuredContent`.
+- [ ] Run the focused tests and record the expected failures against the current
+      implementation.
+
+**Targeted red checks:**
+
+```bash
+cargo test --test contract mcp_tools -- --nocapture
+cargo test --test contract mcp_schemas -- --nocapture
+cargo test --test contract mcp_transport -- --nocapture
+cargo test --test database phase2_regressions -- --nocapture
+```
+
+**Abort condition:** Stop if the failing evidence shows a source other than the
+MCP presentation boundary or if a proposed assertion would rewrite opaque
+caller JSON.
+
+**Exit evidence:** Tests fail only because current MCP timestamps are component
+arrays or because output schemas are unconstrained.
+
+### Task 18: Add typed canonical MCP response views
+
+**Source:** `SPEC.md` FR-38 and Section 14.11.1; `DESIGN.md` Sections
+11.1–11.3.
+
+**Files:**
+
+- Create: `src/mcp/views.rs`
+- Modify: `src/mcp/mod.rs`
+- Modify: `src/mcp/responses.rs`
+- Modify: `src/mcp/tools/mod.rs`
+- Modify: `src/mcp/tools/list.rs`
+- Modify: `src/mcp/tools/history.rs`
+- Modify: `src/remindi/service.rs`
+
+**Steps:**
+
+- [ ] Add the private `CanonicalTimestamp` string newtype with fallible
+      `OffsetDateTime` conversion, Serde serialization, and Schemars
+      `date-time` metadata.
+- [ ] Add typed item, trigger, recurrence, event, and completion-evidence views
+      containing only fields already exposed by MCP.
+- [ ] Implement consuming `TryFrom` conversions so large domain values move
+      into views instead of being cloned.
+- [ ] Preserve `null` and omission behavior for every optional field.
+- [ ] Keep `owner_id` absent without a post-serialization deletion pass.
+- [ ] Convert new server-owned event-detail timestamps to canonical strings
+      before persistence.
+- [ ] Normalize only the known historical server-owned timestamp keys when
+      constructing `EventView`; accept canonical strings, `null`, and legacy
+      component arrays.
+- [ ] Return `HandlerError::Serialization` on any required conversion failure.
+      Do not substitute `null` or the legacy array.
+- [ ] Replace generic `Value` output parameters for list and history with the
+      typed view schemas.
+- [ ] Generate structured content and text fallback from the same typed success
+      response.
+- [ ] Leave domain models, request DTOs, request hashes, cursors, idempotency
+      records, repository timestamp mapping, and SQLite migrations unchanged.
+
+**Targeted green checks:**
+
+```bash
+cargo fmt --all -- --check
+cargo test --test contract mcp_tools -- --nocapture
+cargo test --test contract mcp_schemas -- --nocapture
+cargo test --test contract mcp_transport -- --nocapture
+cargo test --test database phase2_regressions -- --nocapture
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+```
+
+**Abort conditions:**
+
+- a database migration becomes necessary;
+- an idempotency request hash changes;
+- an existing cursor becomes invalid;
+- an MCP response exposes a previously hidden field;
+- caller-supplied opaque JSON changes;
+- a required timestamp conversion silently loses an error.
+
+**Rollback before deployment:** Revert the response-view commit. No data
+rollback is required because this task does not change persisted schema or
+existing rows.
+
+**Exit evidence:** All focused tests pass, output schemas are typed, and the
+complete source diff remains inside the listed files.
+
+### Task 19: Verify, document, and release the correction
+
+**Source:** `SPEC.md` Sections 23, 27, and 28; `DESIGN.md` Sections 23–24.
+
+**Files:**
+
+- Modify: `README.md`
+- Modify: `Cargo.toml` only if the release commit owns the patch-version bump
+- Modify: deployment image reference only during the separately authorized
+  release step
+
+**Steps:**
+
+- [ ] Document the canonical timestamp output and the correction from legacy
+      component arrays.
+- [ ] Parse every JSON example in the governing documents and README.
+- [ ] Run the complete Rust formatting, lint, test, and Docker contract suites.
+- [ ] Build an image tagged with the exact candidate commit.
+- [ ] Start the candidate locally with a disposable database and exercise
+      initialize, add, list, snooze, complete, cancel, and history through real
+      MCP transport.
+- [ ] Recursively inspect captured structured and text results for forbidden
+      server-owned timestamp arrays, objects, or numbers.
+- [ ] Restart the candidate and repeat list/history checks to prove persisted
+      rows still render canonically.
+- [ ] Verify that no migration ran, existing cursors still decode, and an
+      idempotent mutation retry still returns its original result.
+- [ ] Review the complete diff for secrets, unrelated changes, generated junk,
+      and accidental public-field expansion.
+- [ ] Stop at the production hold point and obtain explicit release authority.
+- [ ] After authorization, preserve the current image reference, deploy the
+      commit-tagged image, and verify real production MCP list/history output.
+- [ ] If live verification fails, restore the prior image and verify service
+      health and MCP initialization. Do not restore the database.
+- [ ] Commit and push verified milestones with Conventional Commit titles.
+
+**Full checks:**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+docker compose config --quiet
+docker compose build
+```
+
+**Production hold point:** Documentation approval and plan readiness do not
+authorize deployment. The exact candidate commit, image tag, target service,
+rollback image, and current verification evidence must be presented before the
+production mutation.
+
+### Phase 9 gate
+
+The phase passes only when:
+
+- `G-12` and `FR-38` have direct contract and real-transport evidence;
+- every applicable server-owned MCP timestamp is exactly
+  `YYYY-MM-DDTHH:MM:SS.sssZ`;
+- structured content and text fallback agree;
+- historical event-detail arrays normalize without a database migration;
+- opaque caller JSON, cursors, request hashes, and idempotency replay remain
+  unchanged;
+- the complete regression suite passes;
+- the deployed image, if separately authorized, passes live verification; and
+- the repository and operational diff contain no unrelated changes or secrets.
+
+## 11. Requirement traceability
 
 Detailed tests retain the exact requirement IDs. This table assigns each source
 area to the phase that first closes it; Phase 8 reruns the complete set.
@@ -781,3 +1022,4 @@ area to the phase that first closes it; Phase 8 reruns the complete set.
 | 6 — Administration | `G-02`, `G-09`–`G-11`; `FR-30`–`FR-33`, `FR-37`; runtime settings, adapter configuration, workload control, redaction, and admin audit |
 | 7 — Backup/restore | `G-02`, `G-08`, `G-09`; `FR-34`–`FR-37`; backup, upload/download, retention, guarded restore, rollback, and recovery |
 | 8 — Docker acceptance | `G-01`–`G-11`, `FR-01`–`FR-37`; all NFRs, deployment requirements, acceptance criteria, and Definition of Done |
+| 9 — MCP timestamp correction | `G-12`, `FR-38`; canonical typed timestamp output, legacy detail compatibility, schema accuracy, real transport, and rollback |

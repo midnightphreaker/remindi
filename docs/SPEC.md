@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document status | Draft for implementation |
-| Version | 1.2.0 |
+| Document status | Draft for timestamp wire-format correction |
+| Version | 1.3.0 |
 | Author | Shane Burger |
 | Date | 2026-07-18 |
-| Last updated | 2026-07-18 |
+| Last updated | 2026-07-19 |
 
 ## 1. Executive Summary
 
@@ -135,6 +135,8 @@ The system must:
 - Required background trigger evaluation, enabled by default and controllable
   through the WebUI.
 - Concurrency control, idempotent mutations, structured errors, and logs.
+- Canonical UTC RFC 3339 timestamp strings in all server-owned timestamp fields
+  returned by MCP tools.
 - Backup, migration, health, and operational guidance.
 - A dependency-light WebUI and JSON administration API on the same listener.
 - An application-rendered sign-in modal with optional WebUI authentication.
@@ -162,6 +164,10 @@ The system must:
 - Editing bootstrap, security, credential, bind, or filesystem settings from the
   WebUI.
 - Manual deletion of backup files through the WebUI.
+- Localized, relative, or natural-language timestamp rendering in MCP results.
+- Unix epoch numbers, component arrays, or multiple timestamp representations
+  selected through content negotiation.
+- Rewriting timestamp-like values inside caller-supplied opaque metadata.
 
 ## 4. Goals and Non-Goals
 
@@ -180,6 +186,7 @@ The system must:
 | G-09 | One user can operate and recover their container through a protected WebUI. |
 | G-10 | The scheduler evaluates Remindi items independently of connected MCP clients. |
 | G-11 | Bootstrap secrets remain environment-owned and are never exposed by the WebUI. |
+| G-12 | An agent can read every server-owned MCP timestamp directly as one canonical JSON string. |
 
 ### 4.2 Non-goals
 
@@ -210,6 +217,7 @@ The system must:
 | Logical work session | Agent-supplied session identity used by Remindi item trigger semantics; it is not an MCP transport session. |
 | Bootstrap setting | Environment-owned security, identity, bind, or filesystem configuration that the WebUI may display only in redacted/read-only form. |
 | Runtime setting | Safe mutable configuration persisted in SQLite and changeable through the authenticated WebUI. |
+| Canonical MCP timestamp | A UTC RFC 3339 JSON string with exactly three fractional-second digits and a `Z` suffix, for example `2026-07-19T06:00:00.000Z`. |
 
 ## 6. Functional Requirements
 
@@ -293,6 +301,13 @@ The system must:
 - **FR-37:** Administrative mutations append immutable administrative audit
   events with actor, request, time, action, outcome, and redacted details.
 
+### 6.6 MCP timestamp wire format
+
+- **FR-38:** Every server-owned timestamp returned in MCP
+  `structuredContent` or its text JSON fallback is a canonical MCP timestamp.
+  A present timestamp is never a JSON array, object, integer, or floating-point
+  value. Optional timestamps retain their existing `null` or omission behavior.
+
 ## 7. Non-Functional Requirements
 
 | Area | Requirement |
@@ -303,6 +318,7 @@ The system must:
 | Adapter latency | Each adapter evaluation has a configurable timeout, default 5 seconds. Slow adapters do not hold a database write transaction open. |
 | Capacity | Version 1 targets 1 million rows in `remindi` and 20 million event rows on one host. |
 | Compatibility | Input schemas use JSON Schema draft 2020-12 concepts supported by the chosen MCP SDK. |
+| Timestamp interoperability | MCP output schemas identify server-owned timestamps as JSON strings with `format: date-time`; structured content and text fallback use the same canonical value. |
 | Portability | Linux containers are the supported runtime. Development may run on another platform when Docker and the test suite work there. |
 | Maintainability | Schema migrations are ordered, transactional where SQLite permits, and reversible through backup restore. |
 | Observability | Every request has a request ID; every mutation has an actor and audit event. |
@@ -1597,6 +1613,71 @@ the current Remindi item and resulting version.
 }
 ```
 
+#### 14.11.1 Timestamp representation
+
+MCP results use one timestamp representation so an agent can compare, copy, and
+reuse a value without interpreting Rust-specific serialization.
+
+Every server-owned timestamp in `structuredContent` and the text JSON fallback
+must satisfy all of these rules:
+
+- the JSON type is `string`;
+- the value is normalized to UTC;
+- the syntax is RFC 3339;
+- the fractional second has exactly three digits;
+- the suffix is `Z`;
+- the value matches
+  `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`.
+
+For example:
+
+```json
+{
+  "created_at": "2026-07-19T06:00:00.000Z",
+  "updated_at": "2026-07-19T06:05:12.340Z",
+  "snooze_until": null
+}
+```
+
+The contract applies to these current response locations and to any future
+server-owned MCP timestamp:
+
+| Tool result | Timestamp locations |
+|---|---|
+| `remindi_check` | `data.checked_at` |
+| `remindi_list` | item scheduling, evaluation, snooze, lifecycle, creation, update, completion, and cancellation timestamps; nested trigger and recurrence timestamps |
+| `remindi_history` | event `occurred_at`; completion-evidence `observed_at` and `recorded_at`; server-owned timestamp values inside event details |
+
+Optional fields preserve their documented presence behavior. A field that is
+currently present with no value remains `null`; this correction does not add or
+remove optional fields.
+
+Input timestamps continue accepting `Z` or an explicit UTC offset. The server
+normalizes the instant only when returning it:
+
+```json
+{
+  "input": "2026-07-19T16:30:00.123456+10:00",
+  "output": "2026-07-19T06:30:00.123Z"
+}
+```
+
+The server must not recursively rewrite values in caller-supplied
+`parameters`, links, evidence `metadata`, or other opaque JSON. A caller may
+use a timestamp-like key for its own data, and Remindi does not own that
+representation.
+
+If a required server-owned timestamp cannot be formatted, the tool returns the
+standard `INTERNAL_ERROR`; it must not fall back to a component array, an epoch
+number, an object, or `null`. The structured and text representations are
+generated from the same typed response and must contain identical timestamp
+strings.
+
+Historical event details that contain the legacy component-array
+representation are normalized at the MCP response boundary. This read-time
+compatibility does not rewrite SQLite rows and does not require a database
+migration.
+
 ### 14.12 WebUI and administration API
 
 The browser never calls MCP. It uses a same-origin JSON API that authenticates
@@ -2178,6 +2259,14 @@ remain available.
 - Verify annotations classify `list` and `history` as read-only and `check` as
   potentially mutating.
 - Verify structured success and error responses.
+- Verify every server-owned timestamp in `remindi_check`, `remindi_list`, and
+  `remindi_history` is a canonical fixed-millisecond UTC RFC 3339 string.
+- Verify output schemas declare timestamp fields as strings with
+  `format: date-time`.
+- Verify structured content and text JSON fallback contain identical timestamp
+  values.
+- Verify historical server-owned event-detail component arrays are normalized
+  without rewriting caller-supplied opaque metadata.
 - Verify `/mcp` accepts Streamable HTTP and rejects missing or incorrect bearer
   tokens.
 - Verify no tool schema accepts `owner_id`.
@@ -2203,6 +2292,9 @@ remain available.
    snoozed times in history.
 3. Add an hourly recurring Remindi item, miss three occurrences under each policy,
    and verify deterministic advancement.
+4. Add, snooze, complete, cancel, list, and inspect history through real MCP;
+   verify every returned server timestamp is a canonical string and no
+   timestamp component array appears.
 4. Add a next-session Remindi item and prove it does not fire in the creation session
    but fires in the next.
 5. Add a goal-linked Remindi item and fire it only when that goal is supplied active.
@@ -2398,6 +2490,8 @@ Health must not expose Remindi item content or owner identifiers.
 | Runtime setting breaks service behavior | Strict allowlist, bounds, optimistic versions, audit, and restart-required markers. |
 | Restore corrupts or loses live state | Candidate validation, maintenance lock, verified pre-restore backup, atomic swap, restore journal, and tested rollback. |
 | WebUI attempts to control its own container | Lifecycle controls are limited to in-process MCP and scheduler workloads; no Docker socket. |
+| Rust-native timestamp arrays confuse agents or leak into future fields | Typed MCP response views own timestamp formatting, output schemas identify date-time strings, and recursive contract checks reject server-owned component arrays. |
+| Existing history contains legacy timestamp arrays in event details | Normalize only known server-owned detail fields at the MCP response boundary; leave persisted rows and opaque caller metadata unchanged. |
 
 ## 27. Acceptance Criteria
 
@@ -2419,6 +2513,12 @@ The version 1 implementation is accepted only when all criteria below pass.
 - [ ] Completion without valid evidence is rejected.
 - [ ] Cancellation is soft, terminal, and auditable.
 - [ ] Fixed recurrence supports coalesce, catch-up, and skip policies.
+- [ ] Every server-owned timestamp returned by all applicable MCP tools is a
+      canonical UTC RFC 3339 string with exactly three fractional-second digits.
+- [ ] MCP output schemas describe timestamp fields as date-time strings, and
+      structured content matches the text JSON fallback.
+- [ ] Legacy server-owned timestamp arrays in event details are normalized on
+      read, while caller-supplied opaque metadata is unchanged.
 
 ### 27.2 Integrity and audit
 
@@ -2497,7 +2597,9 @@ Version 1 is done when:
 7. the Docker deployment, WebUI authentication and administration, four
    adapters, scheduler lifecycle, and guarded restore acceptance suites pass;
 8. remaining limitations, especially the inability of MCP alone to wake a
-   disconnected client, are prominent in user documentation.
+   disconnected client, are prominent in user documentation; and
+9. real MCP responses contain only the canonical string representation for
+   server-owned timestamps, including historical event details.
 
 ## Appendix A — Example Workflow
 
