@@ -22,6 +22,8 @@ pub enum DatabaseError {
     NewerSchema(i64),
     #[error("database migration {0} has drifted")]
     MigrationDrift(i64),
+    #[error("database bootstrap control rows are invalid")]
+    InvalidBootstrapRows,
     #[error("database integrity check failed")]
     Integrity,
     #[error("database operation failed")]

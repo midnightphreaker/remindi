@@ -138,14 +138,58 @@ async fn immediate_transaction_rolls_back_item_and_event_together() {
     .execute(transaction.as_mut())
     .await
     .expect("item insert");
+    sqlx::query(
+        "INSERT INTO remindi_events (
+            event_id, remindi_id, event_type, actor_type, actor_id, occurred_at,
+            details_json
+         ) VALUES (?, ?, 'created', 'system', 'system', ?, '{}')",
+    )
+    .bind("00000000-0000-7000-8000-000000000002")
+    .bind("00000000-0000-7000-8000-000000000001")
+    .bind("2026-07-18T00:00:00.000Z")
+    .execute(transaction.as_mut())
+    .await
+    .expect("event insert");
+    sqlx::query(
+        "INSERT INTO completion_evidence (
+            id, remindi_id, evidence_type, summary, reference_uri, observed_at,
+            recorded_at, recorded_by
+         ) VALUES (?, ?, 'test_result', 'passing test', 'file:///test-report',
+                   ?, ?, 'system')",
+    )
+    .bind("00000000-0000-7000-8000-000000000003")
+    .bind("00000000-0000-7000-8000-000000000001")
+    .bind("2026-07-18T00:00:00.000Z")
+    .bind("2026-07-18T00:00:00.000Z")
+    .execute(transaction.as_mut())
+    .await
+    .expect("evidence insert");
+    sqlx::query(
+        "INSERT INTO idempotency_records (
+            actor_id, tool_name, idempotency_key, request_hash, response_json,
+            remindi_id, created_at, expires_at
+         ) VALUES ('system', 'test', 'test-key', 'hash', '{}', ?, ?, ?)",
+    )
+    .bind("00000000-0000-7000-8000-000000000001")
+    .bind("2026-07-18T00:00:00.000Z")
+    .bind("2026-08-18T00:00:00.000Z")
+    .execute(transaction.as_mut())
+    .await
+    .expect("idempotency insert");
     transaction.rollback().await.expect("rollback");
 
     let mut connection = manager.connection().await.expect("database connection");
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remindi")
-        .fetch_one(connection.as_mut())
-        .await
-        .expect("item count");
-    assert_eq!(count, 0);
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT COUNT(*) FROM remindi),
+            (SELECT COUNT(*) FROM remindi_events),
+            (SELECT COUNT(*) FROM completion_evidence),
+            (SELECT COUNT(*) FROM idempotency_records)",
+    )
+    .fetch_one(connection.as_mut())
+    .await
+    .expect("transactional row counts");
+    assert_eq!(counts, (0, 0, 0, 0));
 }
 
 #[tokio::test]
@@ -269,6 +313,93 @@ async fn schema_constraints_reject_invalid_item_state() {
     .expect_err("invalid state must violate the schema");
 
     assert!(error.to_string().contains("CHECK constraint failed"));
+}
+
+#[tokio::test]
+async fn startup_repairs_missing_required_control_rows() {
+    let path = database_path("repair-seeds");
+    DatabaseManager::open(&path)
+        .await
+        .expect("fresh database opens")
+        .close()
+        .await
+        .expect("database closes");
+    let mut connection = SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .expect("database opens directly");
+    sqlx::query("DELETE FROM runtime_settings WHERE setting_key = ?")
+        .bind("scheduler.poll_interval_seconds")
+        .execute(&mut connection)
+        .await
+        .expect("required row removed");
+    connection.close().await.expect("raw database closes");
+
+    let manager = DatabaseManager::open(&path)
+        .await
+        .expect("missing required row is restored");
+    let mut connection = manager.connection().await.expect("database connection");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runtime_settings")
+        .fetch_one(connection.as_mut())
+        .await
+        .expect("runtime settings count");
+    assert_eq!(count, 11);
+}
+
+#[tokio::test]
+async fn startup_rejects_unknown_or_malformed_control_rows() {
+    let unknown_path = database_path("unknown-seed");
+    DatabaseManager::open(&unknown_path)
+        .await
+        .expect("fresh database opens")
+        .close()
+        .await
+        .expect("database closes");
+    let mut connection = SqliteConnection::connect(&format!("sqlite://{}", unknown_path.display()))
+        .await
+        .expect("database opens directly");
+    sqlx::query(
+        "INSERT INTO runtime_settings (
+            setting_key, value_json, updated_at, updated_by
+         ) VALUES ('unknown.setting', '1', '2026-07-18T00:00:00.000Z', 'test')",
+    )
+    .execute(&mut connection)
+    .await
+    .expect("unknown row inserted");
+    connection.close().await.expect("raw database closes");
+    assert!(
+        DatabaseManager::open(&unknown_path)
+            .await
+            .expect_err("unknown row must be refused")
+            .to_string()
+            .contains("bootstrap control rows are invalid")
+    );
+
+    let malformed_path = database_path("malformed-seed");
+    DatabaseManager::open(&malformed_path)
+        .await
+        .expect("fresh database opens")
+        .close()
+        .await
+        .expect("database closes");
+    let mut connection =
+        SqliteConnection::connect(&format!("sqlite://{}", malformed_path.display()))
+            .await
+            .expect("database opens directly");
+    sqlx::query(
+        "UPDATE runtime_settings SET value_json = '\"not-an-integer\"'
+         WHERE setting_key = 'scheduler.poll_interval_seconds'",
+    )
+    .execute(&mut connection)
+    .await
+    .expect("malformed row inserted");
+    connection.close().await.expect("raw database closes");
+    assert!(
+        DatabaseManager::open(&malformed_path)
+            .await
+            .expect_err("malformed row must be refused")
+            .to_string()
+            .contains("bootstrap control rows are invalid")
+    );
 }
 
 #[cfg(unix)]

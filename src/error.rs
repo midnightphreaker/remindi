@@ -76,6 +76,7 @@ pub struct AppError {
     request_id: RequestId,
     code: ErrorCode,
     message: &'static str,
+    retryable: bool,
     details: Map<String, Value>,
 }
 
@@ -88,8 +89,16 @@ impl AppError {
             request_id,
             code: ErrorCode::NotFound,
             message: "The requested resource was not found.",
+            retryable: ErrorCode::NotFound.retryable(),
             details: Map::new(),
         }
+    }
+
+    /// Overrides retryability when the source contract marks it context-dependent.
+    #[must_use]
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
     }
 }
 
@@ -116,7 +125,7 @@ impl IntoResponse for AppError {
             error: ErrorBody {
                 code: self.code,
                 message: self.message,
-                retryable: self.code.retryable(),
+                retryable: self.retryable,
                 details: self.details,
             },
         };
