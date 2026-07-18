@@ -2,6 +2,7 @@
 
 pub mod responses;
 pub mod schemas;
+pub mod server;
 pub mod tools;
 
 use std::sync::Arc;

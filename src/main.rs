@@ -7,6 +7,7 @@ use remindi::{
     config::BootstrapConfig,
     db::DatabaseManager,
     http::{middleware::init_json_tracing, router::build_router},
+    mcp::server::McpWorkload,
 };
 use tokio::net::TcpListener;
 
@@ -26,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(UuidV7Generator),
     )
     .with_database(Arc::clone(&database));
+    let mcp = Arc::new(McpWorkload::new(&state).context("MCP workload startup failed")?);
+    let state = state.with_mcp(Arc::clone(&mcp));
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind the fixed listener at {address}"))?;
@@ -36,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("control plane failed");
     state.set_ready(false);
+    mcp.stop().context("MCP workload shutdown failed")?;
     drop(state);
+    drop(mcp);
     Arc::try_unwrap(database)
         .map_err(|_| anyhow::anyhow!("database still has active application references"))?
         .close()

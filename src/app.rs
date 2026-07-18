@@ -13,6 +13,7 @@ use crate::{
     clock::{Clock, IdGenerator},
     config::BootstrapConfig,
     db::DatabaseManager,
+    mcp::server::McpWorkload,
 };
 
 /// Shared state for the always-on control plane.
@@ -22,6 +23,7 @@ pub struct AppState {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     database: Option<Arc<DatabaseManager>>,
+    mcp: Option<Arc<McpWorkload>>,
     ready: Arc<AtomicBool>,
 }
 
@@ -38,6 +40,7 @@ impl AppState {
             clock,
             ids,
             database: None,
+            mcp: None,
             ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -46,6 +49,13 @@ impl AppState {
     #[must_use]
     pub fn with_database(mut self, database: Arc<DatabaseManager>) -> Self {
         self.database = Some(database);
+        self
+    }
+
+    /// Attaches the in-process MCP workload to the control plane.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Arc<McpWorkload>) -> Self {
+        self.mcp = Some(mcp);
         self
     }
 
@@ -71,6 +81,30 @@ impl AppState {
     #[must_use]
     pub fn database(&self) -> Option<&DatabaseManager> {
         self.database.as_deref()
+    }
+
+    /// Returns a shared database reference for process-owned workloads.
+    #[must_use]
+    pub fn database_shared(&self) -> Option<Arc<DatabaseManager>> {
+        self.database.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the shared clock seam.
+    #[must_use]
+    pub fn clock_shared(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
+    }
+
+    /// Returns the shared identifier seam.
+    #[must_use]
+    pub fn ids_shared(&self) -> Arc<dyn IdGenerator> {
+        Arc::clone(&self.ids)
+    }
+
+    /// Returns the attached MCP workload when configured.
+    #[must_use]
+    pub fn mcp_shared(&self) -> Option<Arc<McpWorkload>> {
+        self.mcp.as_ref().map(Arc::clone)
     }
 
     /// Reports whether all currently implemented readiness checks pass.

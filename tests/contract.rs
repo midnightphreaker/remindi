@@ -4,3 +4,5 @@ mod foundation;
 mod mcp_schemas;
 #[path = "contract/mcp_tools.rs"]
 mod mcp_tools;
+#[path = "contract/mcp_transport.rs"]
+mod mcp_transport;
