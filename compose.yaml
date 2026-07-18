@@ -1,0 +1,38 @@
+services:
+  remindi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: remindi:1.0.0
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${REMINDI_WEBUI_HOST:-127.0.0.1}:${REMINDI_WEBUI_PORT:-8000}:8000"
+    environment:
+      REMINDI_OWNER_ID: "${REMINDI_OWNER_ID:?required}"
+      REMINDI_MCP_TOKEN: "${REMINDI_MCP_TOKEN:?required}"
+      REMINDI_WEBUI_ENABLE: "${REMINDI_WEBUI_ENABLE:-true}"
+      REMINDI_WEBUI_AUTH: "${REMINDI_WEBUI_AUTH:-true}"
+      REMINDI_WEBUI_USERNAME: "${REMINDI_WEBUI_USERNAME:-}"
+      REMINDI_WEBUI_PASSWORD: "${REMINDI_WEBUI_PASSWORD:-}"
+      REMINDI_WEBUI_COOKIE_SECURE: "${REMINDI_WEBUI_COOKIE_SECURE:-false}"
+      REMINDI_LOG_LEVEL: "${REMINDI_LOG_LEVEL:-info}"
+    volumes:
+      - remindi-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  remindi-data:

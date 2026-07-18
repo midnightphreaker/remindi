@@ -1,0 +1,10 @@
+.git
+.worktrees
+.codex
+.superpowers
+target
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
