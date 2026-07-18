@@ -11,11 +11,6 @@ it does not execute them. A disconnected MCP client cannot be woken by an MCP
 server. Agents therefore pull ready work with `remindi_check`, while the
 background scheduler advances time- and condition-based state between checks.
 
-The reference hosted deployment is:
-
-- MCP: `https://mcp.phrk.org/remindi`
-- WebUI: `https://mcp.phrk.org/remindi-ui/`
-
 Both surfaces require private credentials. The MCP bearer token and WebUI
 username/password are deliberately separate.
 
