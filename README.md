@@ -126,7 +126,7 @@ database at a time.
 - applies task, session, continuation, and active-goal context supplied by the
   current agent;
 - returns due, overdue, and manual-verification work to that agent;
-- creates an auditable `checked` event;
+- persists only the state transitions and events produced by evaluation;
 - supplies the current item version needed by later mutations.
 
 Current implementation caveat: the published `evaluate_conditions` field on
@@ -615,7 +615,7 @@ earlier fire time; then stable ID.
 | `task_lineage_id` | Optional, at most 512 characters. |
 | `lifecycle_event` | Required: `task_start`, `checkpoint`, `continuation`, or `final_review`. |
 | `active_goal_ids` | Up to 1,000 unique IDs; default empty. |
-| `include_scheduled` | Include not-yet-ready matches; default `false`. |
+| `include_scheduled` | Published default `false`; current responses still omit candidates that have no readiness, so this does not expose future scheduled items. |
 | `evaluate_conditions` | Published default `true`; currently ignored by the MCP handler. |
 | `limit` | 1–200; default 50. |
 | `cursor` | Opaque continuation cursor, at most 2,048 characters. |
@@ -826,7 +826,9 @@ Supported event filters are `created`, `checked`, `became_due`,
 `became_overdue`, `condition_evaluated`, `occurrence_advanced`, `snoozed`,
 `updated`, `completed`, `cancelled`, `delivery_attempted`,
 `delivery_succeeded`, and `delivery_failed`. The final three are reserved by
-the schema; version 1 does not deliver notifications.
+the schema; version 1 does not deliver notifications. `checked` is also
+schema-compatible, but the current service does not append a generic event for
+every check; it records the specific transitions that evaluation produces.
 
 ## Agent pull workflow
 
@@ -1002,7 +1004,10 @@ Runtime settings use optimistic concurrency:
 ```
 
 Send that body to `PATCH /api/v1/settings/{key}` with browser session and CSRF
-headers. Every accepted or rejected administration action is audited.
+headers. The admin event stream records source-defined actions such as login
+outcomes, setting/adapter/workload changes, and backup/restore outcomes. It is
+not an exhaustive HTTP access log; some authentication, CSRF, and early
+validation rejections return without an admin event.
 
 Important current behavior: the API reports `restart_required: false` for all
 settings, but scheduler timing and adapter execution limits are loaded only
@@ -1168,6 +1173,9 @@ Trigger parameters:
 }
 ```
 
+`expected_status` is optional. When supplied, it must be one of the status
+codes allowed by the administrator-configured alias.
+
 Each alias defines:
 
 - an HTTPS URL with no embedded credentials or fragment;
@@ -1212,8 +1220,9 @@ Trigger parameters:
 ```
 
 The adapter configuration contains canonical existing roots and absolute alias
-paths. Aliases may not contain `..`; startup and runtime canonicalization
-ensure symlinks cannot escape an allowed root.
+paths. A configured path may not contain a parent-directory (`..`) component;
+startup and runtime canonicalization ensure symlinks cannot escape an allowed
+root.
 
 ### Network destination policy
 
@@ -1725,7 +1734,10 @@ cargo +1.97.1 test --release --test performance --locked -- \
 ```
 
 See [`docs/acceptance-performance.md`](docs/acceptance-performance.md) for the
-reference environment, targets, and latest recorded result.
+reference environment, targets, and full result. The recorded indexed
+project-check p95 was 101.811 ms against the `<250 ms` acceptance target on
+that reference host; it is evidence for that run, not a guarantee for other
+hardware or workloads.
 
 ### Database migrations
 
