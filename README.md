@@ -1132,9 +1132,31 @@ The “actual effect” column is the current source-of-truth implementation.
 
 ## Condition adapters
 
-Condition creators select an adapter and an administrator-defined alias. They
-cannot supply an arbitrary destination. All four adapters are disabled by
-default.
+Condition adapters are read-only sensors for reminders that mean “revisit this
+when something becomes true.” A normal trigger waits for a time, session,
+continuation, or active goal. A condition trigger asks the scheduler to poll an
+adapter until it reports `satisfied`.
+
+Configuration and use are intentionally separate:
+
+1. The owner enables an adapter in the WebUI and, where required, defines the
+   destinations it may inspect.
+2. A model creates a condition reminder through `remindi_add`, referring only
+   to an administrator-defined alias.
+3. The background scheduler evaluates the condition at its polling interval.
+4. Once the condition is satisfied, the item becomes due and is returned by a
+   later `remindi_check`.
+
+Adapters do not wake or contact an MCP client by themselves. Agents should
+continue calling `remindi_check` at task start, checkpoints, continuations, and
+final review.
+
+The MCP tools cannot enable adapters, create aliases, add filesystem roots, or
+supply arbitrary destinations. This keeps a model from turning Remindi into a
+general-purpose network or filesystem probe. Enabling `http_health`,
+`tcp_reachable`, or `file_exists` without configuring any aliases has no
+practical effect because the model has no valid target to reference. All four
+adapters are therefore disabled by default.
 
 Alias names are 1–128 ASCII letters, digits, `.`, `_`, or `-`. Evaluations
 produce `satisfied`, `unsatisfied`, `unknown`, or `error` with a bounded safe
@@ -1142,7 +1164,17 @@ summary, observation timestamp, adapter version, and latency.
 
 ### `observation_window_ended`
 
-Pure time comparison with no external access.
+**Purpose:** revisit work after a test, deployment bake period, or observation
+window has finished.
+
+For example:
+
+> Wait until 09:00 tomorrow, then remind me to inspect whether the deployment
+> remained stable.
+
+The administrator only needs to enable the adapter; it has no aliases or
+external destinations. The model supplies the end of the observation window
+on each reminder:
 
 Trigger parameters:
 
@@ -1160,9 +1192,25 @@ Admin configuration:
 }
 ```
 
+This adapter performs a pure time comparison and has no external access. For a
+simple “remind me at this time” request, an `at_time` trigger is more direct.
+Use `observation_window_ended` when the timestamp specifically represents the
+end of a test or observation period and retaining a condition-evaluation
+result is useful.
+
 ### `http_health`
 
-Performs a bounded HTTPS GET against a configured alias.
+**Purpose:** revisit work when a website, API, deployment, or other HTTPS
+service reaches an expected health state.
+
+For example:
+
+> After the deployment, remind me when the production health endpoint returns
+> HTTP 200.
+
+The administrator first creates an alias such as `remindi-production` for a
+specific HTTPS health URL and enables the adapter. The model can then create a
+condition reminder using that alias:
 
 Trigger parameters:
 
@@ -1175,6 +1223,22 @@ Trigger parameters:
 
 `expected_status` is optional. When supplied, it must be one of the status
 codes allowed by the administrator-configured alias.
+
+The resulting condition trigger can poll every five minutes and still require
+a manual review at a deadline:
+
+```json
+{
+  "type": "condition",
+  "adapter": "http_health",
+  "parameters": {
+    "target": "remindi-production",
+    "expected_status": 200
+  },
+  "poll_interval_seconds": 300,
+  "manual_check_at": "2026-07-22T09:00:00+10:00"
+}
+```
 
 Each alias defines:
 
@@ -1190,10 +1254,22 @@ HTTPS redirects are followed. TLS certificate validation remains enabled, no
 proxy is used, DNS results are revalidated, and the response body is consumed
 only up to its configured bound.
 
+Use this adapter for an application-level health endpoint. It proves more than
+`tcp_reachable` because the service must return an allowed HTTP response, not
+merely accept a network connection.
+
 ### `tcp_reachable`
 
-Opens a TCP connection to a configured host and port. It sends no application
-bytes.
+**Purpose:** revisit work when a database, SSH server, message broker, or other
+non-HTTP service begins accepting network connections.
+
+For example:
+
+> Remind me when PostgreSQL is reachable again after the server restart.
+
+The administrator creates an alias such as `postgres-primary`, supplying its
+host, port, and private-destination policy, then enables the adapter. The model
+uses only the alias:
 
 Trigger parameters:
 
@@ -1206,10 +1282,35 @@ Trigger parameters:
 Each alias contains a nonblank host up to 253 characters, port 1–65,535, and
 the explicit `allow_private` policy.
 
+The adapter opens a TCP connection and immediately closes it without sending
+application bytes. A successful result means only that something accepted the
+connection. It does not authenticate, issue a database query, or prove that
+the application protocol is healthy. Prefer `http_health` when the target
+offers a suitable health endpoint.
+
 ### `file_exists`
 
-Checks metadata existence for an administrator-configured absolute path alias.
-It never reads file contents.
+**Purpose:** revisit work after another process creates a backup, export,
+download, deployment marker, or other expected file.
+
+For example:
+
+> Remind me when the nightly backup creates its completion marker.
+
+The target must be visible inside the Remindi container. Mount the smallest
+required host directory read-only; for example:
+
+```yaml
+services:
+  remindi:
+    volumes:
+      - remindi-data:/data
+      - /srv/backups:/watched/backups:ro
+```
+
+The administrator then adds `/watched/backups` as an allowed root, maps an
+alias such as `nightly-backup` to an absolute path beneath that root, and
+enables the adapter. The model refers only to the alias:
 
 Trigger parameters:
 
@@ -1223,6 +1324,35 @@ The adapter configuration contains canonical existing roots and absolute alias
 paths. A configured path may not contain a parent-directory (`..`) component;
 startup and runtime canonicalization ensure symlinks cannot escape an allowed
 root.
+
+The adapter checks filesystem metadata only. It does not read, execute, modify,
+or delete the file. Use it when file creation itself is the completion signal;
+it does not verify the contents or integrity of the resulting artifact.
+
+### Making aliases discoverable to agents
+
+The MCP interface deliberately does not expose the administrator's adapter
+configuration. Record the safe alias names and their meanings in project
+instructions so models know what they may use without learning sensitive
+destination details:
+
+```markdown
+## Remindi condition adapters
+
+Available aliases:
+
+- HTTP `remindi-production`: production Remindi health endpoint
+- TCP `postgres-primary`: primary PostgreSQL service
+- File `nightly-backup`: nightly backup completion marker
+
+Use condition reminders when asked to revisit work after one of these
+conditions becomes true. Do not invent adapter aliases.
+```
+
+Configure only sensors that serve a real workflow. A sensible home-lab setup
+often starts with one or two HTTP health aliases, adds TCP aliases only for
+services without HTTP health endpoints, and leaves `file_exists` disabled
+until a specific read-only directory and marker file are needed.
 
 ### Network destination policy
 
