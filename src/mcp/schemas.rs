@@ -26,7 +26,32 @@ pub fn input_schema<T: JsonSchema>() -> Value {
             Value::String("https://json-schema.org/draft/2020-12/schema".to_owned()),
         );
     }
+    strip_rust_unsigned_integer_formats(&mut value);
     value
+}
+
+pub(crate) fn strip_rust_unsigned_integer_formats(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            let is_rust_unsigned_format = object
+                .get("format")
+                .and_then(Value::as_str)
+                .and_then(|format| format.strip_prefix("uint"))
+                .is_some_and(|width| width.bytes().all(|byte| byte.is_ascii_digit()));
+            if is_rust_unsigned_format {
+                object.remove("format");
+            }
+            for child in object.values_mut() {
+                strip_rust_unsigned_integer_formats(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_rust_unsigned_integer_formats(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -50,6 +50,27 @@ fn discovery_exposes_exactly_eight_stable_tools_with_complete_contracts() {
 }
 
 #[test]
+fn discovery_does_not_publish_rust_unsigned_integer_formats() {
+    for tool in McpServer::tool_definitions() {
+        let input = serde_json::to_string(&tool.input_schema).expect("input schema serializes");
+        assert!(
+            !input.contains("\"format\":\"uint"),
+            "{} input schema contains an OpenCode-incompatible unsigned integer format",
+            tool.name
+        );
+
+        if let Some(output_schema) = tool.output_schema {
+            let output = serde_json::to_string(&output_schema).expect("output schema serializes");
+            assert!(
+                !output.contains("\"format\":\"uint"),
+                "{} output schema contains an OpenCode-incompatible unsigned integer format",
+                tool.name
+            );
+        }
+    }
+}
+
+#[test]
 fn annotations_match_the_eight_tools_semantics() {
     let tools = McpServer::tool_definitions();
     let hints: Vec<_> = tools

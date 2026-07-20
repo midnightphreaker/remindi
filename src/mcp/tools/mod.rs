@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rmcp::model::{Tool, ToolAnnotations};
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
@@ -12,7 +14,7 @@ use super::{
     },
     schemas::{
         AddInput, CancelInput, CheckInput, CompleteInput, HistoryInput, ListInput, SnoozeInput,
-        UpdateInput, input_schema,
+        UpdateInput, input_schema, strip_rust_unsigned_integer_formats,
     },
     views::{CompletionEvidenceView, EventView, RemindiView},
 };
@@ -40,7 +42,7 @@ fn tool<I: JsonSchema, O: JsonSchema + 'static>(
         .as_object()
         .expect("typed MCP input schema is an object")
         .clone();
-    Tool::new(name, description, schema)
+    let mut tool = Tool::new(name, description, schema)
         .with_title(title)
         .with_output_schema::<O>()
         .with_annotations(
@@ -49,7 +51,20 @@ fn tool<I: JsonSchema, O: JsonSchema + 'static>(
                 .destructive(destructive)
                 .idempotent(idempotent)
                 .open_world(open_world),
-        )
+        );
+
+    if let Some(output_schema) = tool.output_schema.as_mut() {
+        let mut output = Value::Object(output_schema.as_ref().clone());
+        strip_rust_unsigned_integer_formats(&mut output);
+        *output_schema = Arc::new(
+            output
+                .as_object()
+                .expect("typed MCP output schema remains an object")
+                .clone(),
+        );
+    }
+
+    tool
 }
 
 pub(crate) fn definitions() -> Vec<Tool> {
